@@ -78,47 +78,71 @@ async function startServer() {
       });
 
       wss.on('connection', (ws, req) => {
-        const parsedUrl = url.parse(req.url, true);
-        const clientId = parsedUrl.query.clientId;
-        
-        if (!clientId) {
-          console.error('WebSocket connection without clientId.');
-          ws.close();
-          return;
-        }
-        
-        const safeClientId = String(clientId).replace(/[^a-zA-Z0-9_-]/g, '');
-        if (safeClientId !== clientId) {
-          console.warn(`Potentially unsafe clientId received: ${clientId}, using sanitized: ${safeClientId}`);
-        }
+  const parsedUrl = url.parse(req.url, true);
+  const clientId = parsedUrl.query.clientId;
+  
+  if (!clientId) {
+    console.error('WebSocket connection without clientId.');
+    ws.close();
+    return;
+  }
+  
+  const safeClientId = String(clientId).replace(/[^a-zA-Z0-9_-]/g, '');
+  if (safeClientId !== clientId) {
+    console.warn(`Potentially unsafe clientId received: ${clientId}, using sanitized: ${safeClientId}`);
+  }
 
-        clients.set(safeClientId, ws);
-        
-        ws.on('message', (message) => {
-        	try {
-        	   const data = JSON.parse(message);
-               if (data.type === 'client-sync' && data.processId) {
-               	const logs = processLogs.get(data.processId) || [];
-               }
-               ws.send(JSON.stringify({
-               	type: "log-history",
-                   logs: logs
-               }));
-        	} catch (error) {
-        	  console.error('Error handling WebSocket message:', error);
-        	}
-        });
-        
-        ws.on('close', () => {
-          clients.delete(safeClientId);
-        });
+  // Store the WebSocket connection
+  clients.set(safeClientId, ws);
+  
+  // Send initial sync if client has active processes
+  const activeProcessesForClient = Array.from(activeProcesses.values())
+    .filter(process => process.clientId === safeClientId);
+  
+  if (activeProcessesForClient.length > 0) {
+    activeProcessesForClient.forEach(process => {
+      const logs = processLogs.get(process.processId) || [];
+      ws.send(JSON.stringify({
+        type: "process-sync",
+        processId: process.processId,
+        isPaused: process.isPaused,
+        sharedCount: process.sharedCount,
+        total: process.originalParams.shareCount,
+        logs: logs
+      }));
+    });
+  }
+  
+  ws.on('message', (message) => {
+    try {
+      const data = JSON.parse(message);
+      if (data.type === 'client-sync' && data.processId) {
+        const logs = processLogs.get(data.processId) || [];
+        ws.send(JSON.stringify({
+          type: "process-sync",
+          processId: data.processId,
+          logs: logs,
+          isPaused: activeProcesses.get(data.processId)?.isPaused || false,
+          sharedCount: activeProcesses.get(data.processId)?.sharedCount || 0,
+          total: activeProcesses.get(data.processId)?.originalParams?.shareCount || 0
+        }));
+      }
+    } catch (error) {
+      console.error('Error handling WebSocket message:', error);
+    }
+  });
+  
+  ws.on('close', () => {
+    clients.delete(safeClientId);
+  });
 
-        ws.on('error', (error) => {
-          console.error(`WebSocket error for client ${safeClientId}:`, error);
-          clients.delete(safeClientId);
-        });
-        ws.clientId = safeClientId;
-      });
+  ws.on('error', (error) => {
+    console.error(`WebSocket error for client ${safeClientId}:`, error);
+    clients.delete(safeClientId);
+  });
+  
+  ws.clientId = safeClientId;
+});
       
       function sendLogToClient(clientId, message, isError = false) {
         const client = clients.get(clientId);
