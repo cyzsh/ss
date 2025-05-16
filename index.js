@@ -46,7 +46,7 @@ async function startServer() {
       const wss = new WebSocket.Server({ server });
       const clients = new Map();
       const activeProcesses = new Map();
-      const allowedOrigin = ["https://fbautoshare.koyeb.app"];
+      const allowedOrigin = ["https://spamshare.koyeb.app"];
       
       if (isDeveloper) {
           allowedOrigin.push('http://localhost:5173');
