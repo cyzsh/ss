@@ -14,26 +14,89 @@ function getOrCreateClientId() {
   }
 }
 
-// Cookie helper functions
-function setCookie(name, value, days) {
+// Convert JSON cookie format to standard cookie string
+function convertCookieToStandardFormat(input) {
+  // If already in string format
+  if (typeof input === 'string') {
+    // Check if it's already a cookie string (contains key=value pairs)
+    if (input.includes('=') && input.includes(';')) {
+      return input;
+    }
+    
+    // Try to parse as JSON
+    try {
+      const parsed = JSON.parse(input);
+      return convertCookieToStandardFormat(parsed); // Recursively handle parsed JSON
+    } catch {
+      return input; // Return as-is if not JSON
+    }
+  }
+  
+  // Handle array format
+  if (Array.isArray(input)) {
+    return input.map(item => {
+      if (item.key && item.value) {
+        return `${item.key}=${item.value}`;
+      }
+      return '';
+    }).filter(Boolean).join('; ');
+  }
+  
+  // Handle object format
+  if (typeof input === 'object' && input !== null) {
+    return Object.entries(input)
+      .map(([key, value]) => `${key}=${value}`)
+      .join('; ');
+  }
+  
+  return String(input);
+}
+
+// Store cookies with Base64 encoding
+function setCookie(name, value, days = 7) {
   const date = new Date();
   date.setTime(date.getTime() + (days * 24 * 60 * 60 * 1000));
   const expires = "expires=" + date.toUTCString();
-  document.cookie = name + "=" + value + ";" + expires + ";path=/;SameSite=Lax";
+  
+  // Convert to standard cookie string format if it's a Facebook cookie
+  const stringValue = name === 'fss_accessToken' 
+    ? convertCookieToStandardFormat(value)
+    : (typeof value === 'string' ? value : JSON.stringify(value));
+  
+  // Base64 encode to handle special characters
+  const encodedValue = btoa(unescape(encodeURIComponent(stringValue)));
+  
+  document.cookie = `${name}=${encodedValue};${expires};path=/;SameSite=Lax;Secure`;
 }
 
+// Retrieve cookies with Base64 decoding
 function getCookie(name) {
   const cookieName = name + "=";
-  const decodedCookie = decodeURIComponent(document.cookie);
-  const cookieArray = decodedCookie.split(';');
+  const cookies = document.cookie.split(';');
   
-  for(let i = 0; i < cookieArray.length; i++) {
-    let cookie = cookieArray[i];
-    while (cookie.charAt(0) === ' ') {
-      cookie = cookie.substring(1);
-    }
+  for(let i = 0; i < cookies.length; i++) {
+    let cookie = cookies[i].trim();
     if (cookie.indexOf(cookieName) === 0) {
-      return cookie.substring(cookieName.length, cookie.length);
+      const encodedValue = cookie.substring(cookieName.length);
+      try {
+        // Decode Base64
+        const decodedValue = decodeURIComponent(escape(atob(encodedValue)));
+        
+        // For access token, return as-is (already converted to string format)
+        if (name === 'fss_accessToken') {
+          return decodedValue;
+        }
+        
+        // Try to parse as JSON, return string if fails
+        try {
+          return JSON.parse(decodedValue);
+        } catch {
+          return decodedValue;
+        }
+      } catch (e) {
+        console.error("Cookie decoding failed:", e);
+        return null;
+      }
     }
   }
   return null;
@@ -86,6 +149,24 @@ function saveFormState() {
   setCookie('fss_shareUrl', state.shareUrl, 7);
   setCookie('fss_delay', state.delay, 7);
   setCookie('fss_limit', state.limit, 7);
+}
+
+// Format cookie for display in textarea
+function formatCookieForDisplay(value) {
+  if (!value) return '';
+  
+  // If it's already a well-formatted cookie string
+  if (typeof value === 'string' && value.includes('=') && value.includes(';')) {
+    return value;
+  }
+  
+  // Try to parse as JSON
+  try {
+    const parsed = JSON.parse(value);
+    return JSON.stringify(parsed, null, 2);
+  } catch {
+    return value;
+  }
 }
 
 // Initialize the app
@@ -387,13 +468,17 @@ function validateToken(token) {
 
 // Validate cookie format
 function validateCookie(cookie) {
-  try {
-    JSON.parse(cookie);
-    return true;
-  } catch (e) {
-    const cookieRegex = /^([^\s=;]+=[^\s=;]*)(;\s*[^\s=;]+=[^\s=;]*)*$/;
-    return cookieRegex.test(cookie.trim());
-  }
+  if (!cookie) return false;
+  
+  // Convert to standard format first
+  const cookieString = convertCookieToStandardFormat(cookie);
+  
+  // Basic validation for Facebook cookies
+  const hasRequiredFields = 
+    cookieString.includes('c_user=') && 
+    cookieString.includes('xs=');
+    
+  return hasRequiredFields;
 }
 
 // Show error message
@@ -629,7 +714,7 @@ function renderMainContent() {
             oninput="handleInputChange(event)"
             placeholder="PASTE YOUR COOKIE OR ACCESS TOKEN HERE (EAAD6V7, EAAAAU, EAAAAAY)"
             required
-          >${state.accessToken}</textarea>
+          >${formatCookieForDisplay(state.accessToken)}</textarea>
         </div>
         
         <div class="mb-3 animate-fade-in-down delay-200">
@@ -1165,6 +1250,7 @@ function copyToClipboard(elementId) {
     title: 'Copied!',
     text: 'Text has been copied to clipboard',
     icon: 'success',
+    timer: 1000,
     showConfirmButton: false
   });
 }
@@ -1182,6 +1268,7 @@ function useToken(elementId) {
     title: 'Success!',
     text: 'Token/Cookie has been applied to the control panel',
     icon: 'success',
+    timer: 1000,
     showConfirmButton: false
   });
 }
