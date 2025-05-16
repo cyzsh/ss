@@ -1,242 +1,274 @@
 // Generate UUID or get from cookie
-	function getOrCreateClientId() {
-	const cookieName = 'fss_cid';
-	const existingId = getCookie(cookieName);
-	
-	if (existingId) {
-	console.log("Existing Client ID: ", existingId);
-	return existingId;
-	} else {
-	const newId = uuidv4();
-	setCookie(cookieName, newId, 365);
-	console.log("New Client ID: ", newId);
-	return newId;
-	}
-	}
-	
-	// Cookie helper functions
-	function setCookie(name, value, days) {
-	const date = new Date();
-	date.setTime(date.getTime() + (days * 24 * 60 * 60 * 1000));
-	const expires = "expires=" + date.toUTCString();
-	document.cookie = name + "=" + value + ";" + expires + ";path=/;SameSite=Lax";
-	}
-	
-	function getCookie(name) {
-	const cookieName = name + "=";
-	const decodedCookie = decodeURIComponent(document.cookie);
-	const cookieArray = decodedCookie.split(';');
-	
-	for(let i = 0; i < cookieArray.length; i++) {
-	let cookie = cookieArray[i];
-	while (cookie.charAt(0) === ' ') {
-	cookie = cookie.substring(1);
-	}
-	if (cookie.indexOf(cookieName) === 0) {
-	return cookie.substring(cookieName.length, cookie.length);
-	}
-	}
-	return null;
-	}
-	
-	// Generate UUID
-	function uuidv4() {
-	return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
-	const r = Math.random() * 16 | 0, v = c === 'x' ? r : (r & 0x3 | 0x8);
-	return v.toString(16);
-	});
-	}
-	
-	// App state 
-	const state = {
-	accessToken: getCookie('fss_accessToken') || "",
-	shareUrl: getCookie('fss_shareUrl') || "",
-	delay: parseInt(getCookie('fss_delay')) || 1500,
-	limit: parseInt(getCookie('fss_limit')) || 10,
-	isSubmitting: false,
-	isPaused: false,
-	logs: [],
-	backendResponse: null,
-	loading: false,
-	clientId: getOrCreateClientId(),
-	a: "96b",
-	b: "6ba2rtl1",
-	c: "js5sal2",
-	apiHost: window.location.hostname,
-	apiHttp: window.location.protocol === 'https:' ? 'https' : 'http',
-	apiWss: window.location.protocol === 'https:' ? 'wss' : 'ws',
-	serverSecret: "JSIUFJFJDKDKDKKkkskskskdkKksjjdjdjjJSISIDJSJJSJSJSIUFJFJDKDKDKKkkskskskdkKksjjdjdjjJSISIDJSJJSJS",
-	ws: null,
-	currentProcessId: null,
-	hasSubmitted: false,
-	terminalAutoScroll: true,
-	reconnectAttempts: 0,
-	maxReconnectAttempts: 10,
-	reconnectDelay: 3000,
-	restoredProcess: false
-	};
-	
-	// Save form state to cookies
-	function saveFormState() {
-	setCookie('fss_accessToken', state.accessToken, 7);
-	setCookie('fss_shareUrl', state.shareUrl, 7);
-	setCookie('fss_delay', state.delay, 7);
-	setCookie('fss_limit', state.limit, 7);
-	}
-	
-	// Initialize the app
-	function initApp() {
-	// Initialize WebSocket
-	initWebSocket();
-	
-	// Check for existing process on load
-	checkExistingProcess();
-	
-	// Render the initial view
-	renderMainContent();
-	renderTokenizerContent();
-	
-	// Setup navigation
-	setupNavigation();
-	
-	updateSubmitButton(validateForm());
-	}
-	
-	// Check for existing process on page load
-	async function checkExistingProcess() {
-	try {
-	const response = await fetch(`${state.apiHttp}://${state.apiHost}/api/check-process`, {
-	method: 'POST',
-	headers: {
-	    'Content-Type': 'application/json',
-	},
-	body: JSON.stringify({
-	    clientSecret: state.serverSecret,
-	    clientId: state.clientId
-	})
-	});
-	
-	const data = await response.json();
-	if (data.processId) {
-	state.currentProcessId = data.processId;
-	state.isSubmitting = true;
-	state.isPaused = data.isPaused || false;
-	state.loading = !data.isPaused;
-	state.restoredProcess = true;
-	
-	// Restore state from existing process
-	if (data.originalParams) {
-	    state.accessToken = data.originalParams.facebookCache;
-	    state.shareUrl = data.originalParams.shareUrl;
-	    state.delay = data.originalParams.timeInterval;
-	    state.limit = data.originalParams.shareCount;
-	}
-	
-	// Restore logs from existing process
-	if (data.logs && data.logs.length > 0) {
-	    state.logs = data.logs.map(log => ({
-	        message: log.message,
-	        isError: log.message.includes('ERROR:'),
-	        id: log.timestamp || Date.now() + Math.random(),
-	        isNew: false
-	    }));
-	}
-	
-	// Show terminal if there are logs
-	if (state.logs.length > 0) {
-	    document.getElementById('terminal-tab').classList.remove('disabled');
-	    document.getElementById('terminal-tab').click();
-	}
-	
-	renderMainContent();
-	}
-	} catch (error) {
-	console.error('Error checking for existing process:', error);
-	}
-	}
-	
-	// Initialize WebSocket with silent reconnection logic
-	function initWebSocket() {
-	const wsUrl = `${state.apiWss}://${state.apiHost}/api?clientId=${state.clientId}`;
-	state.ws = new WebSocket(wsUrl);
-	
-	state.ws.onopen = () => {
-	state.reconnectAttempts = 0;
-	if (state.currentProcessId) {
-	addLog('SYSTEM IS ONLINE.', false);
-	}
-	};
-	
-	state.ws.onmessage = (event) => {
-	try {
-	const data = JSON.parse(event.data);
-	if (data.type === "backend-log") {
-	    addLog(`${data.message}`, data.message.toLowerCase().includes("error"));
-	} else if (data.type === "success-shared") {
-	    state.isSubmitting = false;
-	    state.loading = false;
-	    state.currentProcessId = null;
-	    state.backendResponse = {
-	        success: true,
-	        message: "INJECTION SUCCESSFUL.",
-	        details: data.details ? data.details : "No additional details.", 
-	    };
-	    addLog("OPERATION COMPLETE", false);
-	    updateNavigationState();
-	    renderMainContent();
-	} else if (data.type === "error-shared") {
-	    state.isSubmitting = false;
-	    state.loading = false;
-	    state.currentProcessId = null;
-	    state.backendResponse = {
-	        success: false,
-	        message: data.message || "ERROR: INJECTION FAILED",
-	        details: data.details || "An unexpected error occurred."
-	    };
-	    addLog(data.message || "ERROR: INJECTION FAILED", true);
-	    updateNavigationState();
-	    renderMainContent();
-	} else if (data.type === "process-paused") {
-	    state.isPaused = true;
-	    addLog("PROCESS PAUSED", false);
-	    renderMainContent();
-	} else if (data.type === "process-resumed") {
-	    state.isPaused = false;
-	    addLog("PROCESS RESUMED", false);
-	    renderMainContent();
-	} else if (data.type === "process-stopped") {
-	    state.isSubmitting = false;
-	    state.loading = false;
-	    state.currentProcessId = null;
-	    addLog("PROCESS STOPPED", false);
-	    renderMainContent();
-	} else if (data.type === "process-restarted") {
-	    state.currentProcessId = data.newProcessId || state.currentProcessId;
-	    addLog(`PROCESS RESTARTED WITH NEW ID: ${state.currentProcessId}`, false);
-	    renderMainContent();
-	}
-	} catch (error) {
-	console.error("Error parsing WebSocket message:", error);
-	state.isSubmitting = false;
-	state.loading = false;
-	state.currentProcessId = null;
-	addLog("SYSTEM ERROR: Invalid response format", true);
-	updateNavigationState();
-	renderMainContent();
-	}
-	};
-	
-	state.ws.onclose = () => {
-	if (state.reconnectAttempts < state.maxReconnectAttempts) {
-	state.reconnectAttempts++;
-	setTimeout(initWebSocket, state.reconnectDelay);
-	}
-	};
-	
-	state.ws.onerror = (error) => {
-	console.error("WebSocket error:", error);
-	};
-	}
+function getOrCreateClientId() {
+  const cookieName = 'fss_cid';
+  const existingId = getCookie(cookieName);
+  
+  if (existingId) {
+    console.log("Client ID: ", existingId);
+    return existingId;
+  } else {
+    const newId = uuidv4();
+    setCookie(cookieName, newId, 365);
+    console.log("New Client ID: ", newId);
+    return newId;
+  }
+}
+
+// Cookie helper functions
+function setCookie(name, value, days) {
+  const date = new Date();
+  date.setTime(date.getTime() + (days * 24 * 60 * 60 * 1000));
+  const expires = "expires=" + date.toUTCString();
+  document.cookie = name + "=" + value + ";" + expires + ";path=/;SameSite=Lax";
+}
+
+function getCookie(name) {
+  const cookieName = name + "=";
+  const decodedCookie = decodeURIComponent(document.cookie);
+  const cookieArray = decodedCookie.split(';');
+  
+  for(let i = 0; i < cookieArray.length; i++) {
+    let cookie = cookieArray[i];
+    while (cookie.charAt(0) === ' ') {
+      cookie = cookie.substring(1);
+    }
+    if (cookie.indexOf(cookieName) === 0) {
+      return cookie.substring(cookieName.length, cookie.length);
+    }
+  }
+  return null;
+}
+
+// Generate UUID
+function uuidv4() {
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+    const r = Math.random() * 16 | 0, v = c === 'x' ? r : (r & 0x3 | 0x8);
+    return v.toString(16);
+  });
+}
+
+// Check if in iframe
+if (window.top !== window.self) {
+  window.top.location.href = window.self.location.href;
+}
+
+// App state
+const state = {
+  accessToken: getCookie('fss_accessToken') || "",
+  shareUrl: getCookie('fss_shareUrl') || "",
+  delay: parseInt(getCookie('fss_delay')) || 1500,
+  limit: parseInt(getCookie('fss_limit')) || 10,
+  isSubmitting: false,
+  isPaused: false,
+  logs: [],
+  backendResponse: null,
+  loading: false,
+  clientId: getOrCreateClientId(),
+  a: "96b",
+  b: "6ba2rtl1",
+  c: "js5sal2",
+  apiHost: window.location.hostname,
+  apiHttp: window.location.protocol === 'https:' ? 'https' : 'http',
+  apiWss: window.location.protocol === 'https:' ? 'wss' : 'ws',
+  serverSecret: "JSIUFJFJDKDKDKKkkskskskdkKksjjdjdjjJSISIDJSJJSJSJSIUFJFJDKDKDKKkkskskskdkKksjjdjdjjJSISIDJSJJSJS",
+  ws: null,
+  currentProcessId: null,
+  hasSubmitted: false,
+  terminalAutoScroll: true,
+  reconnectAttempts: 0,
+  maxReconnectAttempts: 10,
+  reconnectDelay: 3000
+};
+
+// Save form state to cookies
+function saveFormState() {
+  setCookie('fss_accessToken', state.accessToken, 7);
+  setCookie('fss_shareUrl', state.shareUrl, 7);
+  setCookie('fss_delay', state.delay, 7);
+  setCookie('fss_limit', state.limit, 7);
+}
+
+// Initialize the app
+function initApp() {
+  // Initialize WebSocket
+  initWebSocket();
+  
+  // Check for existing process on load
+  checkExistingProcess();
+  
+  // Render the initial view
+  renderMainContent();
+  renderTokenizerContent();
+  
+  // Setup navigation
+  setupNavigation();
+  
+  updateSubmitButton(validateForm());
+}
+
+// Enhanced process checking with logs
+async function checkExistingProcess() {
+  try {
+    const response = await fetch(`${state.apiHttp}://${state.apiHost}/api/check-process`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        clientSecret: state.serverSecret,
+        clientId: state.clientId
+      })
+    });
+    
+    const data = await response.json();
+    if (data.processId) {
+      state.currentProcessId = data.processId;
+      state.isSubmitting = true;
+      state.isPaused = data.isPaused || false;
+      state.loading = !data.isPaused;
+      
+      // Restore original parameters
+      if (data.originalParams) {
+        state.accessToken = data.originalParams.facebookCache;
+        state.shareUrl = data.originalParams.shareUrl;
+        state.delay = data.originalParams.timeInterval;
+        state.limit = data.originalParams.shareCount;
+        saveFormState();
+      }
+      
+      // Fetch historical logs if available
+      if (data.logs && data.logs.length > 0) {
+        state.logs = data.logs.map(log => ({
+          message: log.message,
+          isError: log.isError,
+          id: Date.now() + Math.random(),
+          isNew: false
+        }));
+      }
+      
+      renderMainContent();
+      if (state.logs.length > 0) {
+        renderTerminal();
+      }
+    }
+  } catch (error) {
+    console.error('Error checking for existing process:', error);
+  }
+}
+
+// Initialize WebSocket with enhanced reconnection
+function initWebSocket() {
+  const wsUrl = `${state.apiWss}://${state.apiHost}/api?clientId=${state.clientId}`;
+  state.ws = new WebSocket(wsUrl);
+
+  state.ws.onopen = () => {
+    state.reconnectAttempts = 0;
+    if (state.currentProcessId) {
+      // Request latest state when reconnecting
+      state.ws.send(JSON.stringify({
+        type: "client-sync",
+        processId: state.currentProcessId,
+        clientId: state.clientId
+      }));
+      addLog('SYSTEM RECONNECTED. SYNCING...', false);
+    }
+  };
+
+  state.ws.onmessage = (event) => {
+    try {
+      const data = JSON.parse(event.data);
+      
+      if (data.type === "log-history") {
+        // Add historical logs when reconnecting
+        data.logs.forEach(log => {
+          addLog(log.message, log.isError);
+        });
+        return;
+      }
+      
+      if (data.type === "backend-log") {
+        addLog(`${data.message}`, data.message.toLowerCase().includes("error"));
+      } else if (data.type === "success-shared") {
+        state.isSubmitting = false;
+        state.loading = false;
+        state.currentProcessId = null;
+        state.backendResponse = {
+          success: true,
+          message: "INJECTION SUCCESSFUL.",
+          details: data.details ? data.details : "No additional details.", 
+        };
+        addLog("OPERATION COMPLETE", false);
+        updateNavigationState();
+        renderMainContent();
+      } else if (data.type === "error-shared") {
+        state.isSubmitting = false;
+        state.loading = false;
+        state.currentProcessId = null;
+        state.backendResponse = {
+          success: false,
+          message: data.message || "ERROR: INJECTION FAILED",
+          details: data.details || "An unexpected error occurred."
+        };
+        addLog(data.message || "ERROR: INJECTION FAILED", true);
+        updateNavigationState();
+        renderMainContent();
+      } else if (data.type === "process-paused") {
+        state.isPaused = true;
+        addLog("PROCESS PAUSED", false);
+        renderMainContent();
+      } else if (data.type === "process-resumed") {
+        state.isPaused = false;
+        addLog("PROCESS RESUMED", false);
+        renderMainContent();
+      } else if (data.type === "process-stopped") {
+        state.isSubmitting = false;
+        state.loading = false;
+        state.currentProcessId = null;
+        addLog("PROCESS STOPPED", false);
+        renderMainContent();
+      } else if (data.type === "process-restarted") {
+        state.currentProcessId = data.newProcessId || state.currentProcessId;
+        addLog(`PROCESS RESTARTED WITH NEW ID: ${state.currentProcessId}`, false);
+        renderMainContent();
+      } else if (data.type === "process-update") {
+        // Silent updates for progress
+        if (data.sharedCount) {
+          const existingLog = state.logs.find(log => 
+            log.message.includes(`(${data.sharedCount}/${state.limit})`)
+          );
+          if (!existingLog) {
+            addLog(`Shared (${data.sharedCount}/${state.limit}) successfully`, false);
+          }
+        }
+      }
+    } catch (error) {
+      console.error("Error parsing WebSocket message:", error);
+      state.isSubmitting = false;
+      state.loading = false;
+      state.currentProcessId = null;
+      addLog("SYSTEM ERROR: Invalid response format", true);
+      updateNavigationState();
+      renderMainContent();
+    }
+  };
+
+  state.ws.onclose = () => {
+    if (state.currentProcessId) {
+      addLog("CONNECTION LOST. RECONNECTING...", true);
+    }
+    
+    if (state.reconnectAttempts < state.maxReconnectAttempts) {
+      state.reconnectAttempts++;
+      setTimeout(initWebSocket, state.reconnectDelay);
+    } else if (state.currentProcessId) {
+      addLog("MAX RECONNECTION ATTEMPTS REACHED. PROCESS MAY STILL BE RUNNING ON SERVER.", true);
+    }
+  };
+
+  state.ws.onerror = (error) => {
+    console.error("WebSocket error:", error);
+  };
+}
 
 // Setup navigation
 function setupNavigation() {
@@ -1133,7 +1165,6 @@ function copyToClipboard(elementId) {
     title: 'Copied!',
     text: 'Text has been copied to clipboard',
     icon: 'success',
-    timer: 1000,
     showConfirmButton: false
   });
 }
@@ -1151,7 +1182,6 @@ function useToken(elementId) {
     title: 'Success!',
     text: 'Token/Cookie has been applied to the control panel',
     icon: 'success',
-    timer: 1000,
     showConfirmButton: false
   });
 }
