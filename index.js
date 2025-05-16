@@ -1,716 +1,1164 @@
-// index.js
-async function startServer() {
-  return new Promise((resolve, reject) => {
+// Generate UUID or get from cookie
+	function getOrCreateClientId() {
+	const cookieName = 'fss_cid';
+	const existingId = getCookie(cookieName);
+	
+	if (existingId) {
+	console.log("Existing Client ID: ", existingId);
+	return existingId;
+	} else {
+	const newId = uuidv4();
+	setCookie(cookieName, newId, 365);
+	console.log("New Client ID: ", newId);
+	return newId;
+	}
+	}
+	
+	// Cookie helper functions
+	function setCookie(name, value, days) {
+	const date = new Date();
+	date.setTime(date.getTime() + (days * 24 * 60 * 60 * 1000));
+	const expires = "expires=" + date.toUTCString();
+	document.cookie = name + "=" + value + ";" + expires + ";path=/;SameSite=Lax";
+	}
+	
+	function getCookie(name) {
+	const cookieName = name + "=";
+	const decodedCookie = decodeURIComponent(document.cookie);
+	const cookieArray = decodedCookie.split(';');
+	
+	for(let i = 0; i < cookieArray.length; i++) {
+	let cookie = cookieArray[i];
+	while (cookie.charAt(0) === ' ') {
+	cookie = cookie.substring(1);
+	}
+	if (cookie.indexOf(cookieName) === 0) {
+	return cookie.substring(cookieName.length, cookie.length);
+	}
+	}
+	return null;
+	}
+	
+	// Generate UUID
+	function uuidv4() {
+	return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+	const r = Math.random() * 16 | 0, v = c === 'x' ? r : (r & 0x3 | 0x8);
+	return v.toString(16);
+	});
+	}
+	
+	// Check if in iframe
+	if (window.top !== window.self) {
+	window.top.location.href = window.self.location.href;
+	}
+	
+	// App state
+	const state = {
+	accessToken: getCookie('fss_accessToken') || "",
+	shareUrl: getCookie('fss_shareUrl') || "",
+	delay: parseInt(getCookie('fss_delay')) || 1500,
+	limit: parseInt(getCookie('fss_limit')) || 10,
+	isSubmitting: false,
+	isPaused: false,
+	logs: [],
+	backendResponse: null,
+	loading: false,
+	clientId: getOrCreateClientId(),
+	a: "96b",
+	b: "6ba2rtl1",
+	c: "js5sal2",
+	apiHost: window.location.hostname,
+	apiHttp: window.location.protocol === 'https:' ? 'https' : 'http',
+	apiWss: window.location.protocol === 'https:' ? 'wss' : 'ws',
+	serverSecret: "JSIUFJFJDKDKDKKkkskskskdkKksjjdjdjjJSISIDJSJJSJSJSIUFJFJDKDKDKKkkskskskdkKksjjdjdjjJSISIDJSJJSJS",
+	ws: null,
+	currentProcessId: null,
+	hasSubmitted: false,
+	terminalAutoScroll: true,
+	reconnectAttempts: 0,
+	maxReconnectAttempts: 10,
+	reconnectDelay: 3000,
+	restoredProcess: false
+	};
+	
+	// Save form state to cookies
+	function saveFormState() {
+	setCookie('fss_accessToken', state.accessToken, 7);
+	setCookie('fss_shareUrl', state.shareUrl, 7);
+	setCookie('fss_delay', state.delay, 7);
+	setCookie('fss_limit', state.limit, 7);
+	}
+	
+	// Initialize the app
+	function initApp() {
+	// Initialize WebSocket
+	initWebSocket();
+	
+	// Check for existing process on load
+	checkExistingProcess();
+	
+	// Render the initial view
+	renderMainContent();
+	renderTokenizerContent();
+	
+	// Setup navigation
+	setupNavigation();
+	
+	updateSubmitButton(validateForm());
+	}
+	
+	// Check for existing process on page load
+	async function checkExistingProcess() {
+	try {
+	const response = await fetch(`${state.apiHttp}://${state.apiHost}/api/check-process`, {
+	method: 'POST',
+	headers: {
+	    'Content-Type': 'application/json',
+	},
+	body: JSON.stringify({
+	    clientSecret: state.serverSecret,
+	    clientId: state.clientId
+	})
+	});
+	
+	const data = await response.json();
+	if (data.processId) {
+	state.currentProcessId = data.processId;
+	state.isSubmitting = true;
+	state.isPaused = data.isPaused || false;
+	state.loading = !data.isPaused;
+	state.restoredProcess = true;
+	
+	// Restore state from existing process
+	if (data.originalParams) {
+	    state.accessToken = data.originalParams.facebookCache;
+	    state.shareUrl = data.originalParams.shareUrl;
+	    state.delay = data.originalParams.timeInterval;
+	    state.limit = data.originalParams.shareCount;
+	}
+	
+	// Restore logs from existing process
+	if (data.logs && data.logs.length > 0) {
+	    state.logs = data.logs.map(log => ({
+	        message: log.message,
+	        isError: log.message.includes('ERROR:'),
+	        id: log.timestamp || Date.now() + Math.random(),
+	        isNew: false
+	    }));
+	}
+	
+	// Show terminal if there are logs
+	if (state.logs.length > 0) {
+	    document.getElementById('terminal-tab').classList.remove('disabled');
+	    document.getElementById('terminal-tab').click();
+	}
+	
+	renderMainContent();
+	}
+	} catch (error) {
+	console.error('Error checking for existing process:', error);
+	}
+	}
+	
+	// Initialize WebSocket with silent reconnection logic
+	function initWebSocket() {
+	const wsUrl = `${state.apiWss}://${state.apiHost}/api?clientId=${state.clientId}`;
+	state.ws = new WebSocket(wsUrl);
+	
+	state.ws.onopen = () => {
+	state.reconnectAttempts = 0;
+	if (state.currentProcessId) {
+	addLog('SYSTEM IS ONLINE.', false);
+	}
+	};
+	
+	state.ws.onmessage = (event) => {
+	try {
+	const data = JSON.parse(event.data);
+	if (data.type === "backend-log") {
+	    addLog(`${data.message}`, data.message.toLowerCase().includes("error"));
+	} else if (data.type === "success-shared") {
+	    state.isSubmitting = false;
+	    state.loading = false;
+	    state.currentProcessId = null;
+	    state.backendResponse = {
+	        success: true,
+	        message: "INJECTION SUCCESSFUL.",
+	        details: data.details ? data.details : "No additional details.", 
+	    };
+	    addLog("OPERATION COMPLETE", false);
+	    updateNavigationState();
+	    renderMainContent();
+	} else if (data.type === "error-shared") {
+	    state.isSubmitting = false;
+	    state.loading = false;
+	    state.currentProcessId = null;
+	    state.backendResponse = {
+	        success: false,
+	        message: data.message || "ERROR: INJECTION FAILED",
+	        details: data.details || "An unexpected error occurred."
+	    };
+	    addLog(data.message || "ERROR: INJECTION FAILED", true);
+	    updateNavigationState();
+	    renderMainContent();
+	} else if (data.type === "process-paused") {
+	    state.isPaused = true;
+	    addLog("PROCESS PAUSED", false);
+	    renderMainContent();
+	} else if (data.type === "process-resumed") {
+	    state.isPaused = false;
+	    addLog("PROCESS RESUMED", false);
+	    renderMainContent();
+	} else if (data.type === "process-stopped") {
+	    state.isSubmitting = false;
+	    state.loading = false;
+	    state.currentProcessId = null;
+	    addLog("PROCESS STOPPED", false);
+	    renderMainContent();
+	} else if (data.type === "process-restarted") {
+	    state.currentProcessId = data.newProcessId || state.currentProcessId;
+	    addLog(`PROCESS RESTARTED WITH NEW ID: ${state.currentProcessId}`, false);
+	    renderMainContent();
+	}
+	} catch (error) {
+	console.error("Error parsing WebSocket message:", error);
+	state.isSubmitting = false;
+	state.loading = false;
+	state.currentProcessId = null;
+	addLog("SYSTEM ERROR: Invalid response format", true);
+	updateNavigationState();
+	renderMainContent();
+	}
+	};
+	
+	state.ws.onclose = () => {
+	if (state.reconnectAttempts < state.maxReconnectAttempts) {
+	state.reconnectAttempts++;
+	setTimeout(initWebSocket, state.reconnectDelay);
+	}
+	};
+	
+	state.ws.onerror = (error) => {
+	console.error("WebSocket error:", error);
+	};
+	}
+
+// Setup navigation
+function setupNavigation() {
+  const homeTab = document.getElementById('home-tab');
+  const terminalTab = document.getElementById('terminal-tab');
+  const tokenizerTab = document.getElementById('tokenizer-tab');
+  const homeSection = document.getElementById('home-section');
+  const terminalSection = document.getElementById('terminal-section');
+  const tokenizerSection = document.getElementById('tokenizer-section');
+  
+  homeTab.addEventListener('click', () => {
+    homeTab.classList.add('active');
+    terminalTab.classList.remove('active');
+    tokenizerTab.classList.remove('active');
+    homeSection.classList.add('active');
+    terminalSection.classList.remove('active');
+    tokenizerSection.classList.remove('active');
+  });
+  
+  terminalTab.addEventListener('click', () => {
+    terminalTab.classList.add('active');
+    homeTab.classList.remove('active');
+    tokenizerTab.classList.remove('active');
+    terminalSection.classList.add('active');
+    homeSection.classList.remove('active');
+    tokenizerSection.classList.remove('active');
+    renderTerminal();
+  });
+  
+  tokenizerTab.addEventListener('click', () => {
+    tokenizerTab.classList.add('active');
+    homeTab.classList.remove('active');
+    terminalTab.classList.remove('active');
+    tokenizerSection.classList.add('active');
+    homeSection.classList.remove('active');
+    terminalSection.classList.remove('active');
+  });
+  
+  // Enable terminal tab if there are logs
+  if (state.logs.length > 0) {
+    terminalTab.classList.remove('disabled');
+  }
+}
+
+// Update navigation state based on app state
+function updateNavigationState() {
+  const terminalTab = document.getElementById('terminal-tab');
+  
+  // Enable terminal tab if there are logs
+  if (state.logs.length > 0) {
+    terminalTab.classList.remove('disabled');
+  }
+}
+
+function scrollTerminalToBottom() {
+  const terminalContent = document.querySelector('.terminal-content');
+  if (terminalContent && state.terminalAutoScroll) {
+    terminalContent.scrollTop = terminalContent.scrollHeight;
+  }
+}
+
+// Add log message
+function addLog(message, isError) {
+  const newLog = {
+    message,
+    isError,
+    id: Date.now() + Math.random(),
+    isNew: true
+  };
+  
+  state.logs = [...state.logs, newLog];
+  updateNavigationState();
+  
+  // If terminal is visible, update it
+  if (document.getElementById('terminal-section').classList.contains('active')) {
+    renderTerminal();
+  }
+  
+  // Always scroll to bottom when new logs arrive
+  setTimeout(scrollTerminalToBottom, 50);
+}
+
+// Handle input changes
+function handleInputChange(e) {
+  const { name, value } = e.target;
+  switch (name) {
+    case "accessToken":
+      state.accessToken = value;
+      break;
+    case "shareUrl":
+      state.shareUrl = value;
+      break;
+    case "delay":
+      state.delay = parseInt(value, 10) || 1500;
+      break;
+    case "limit":
+      state.limit = parseInt(value, 10) || 10;
+      break;
+    default:
+      break;
+  }
+  saveFormState();
+  updateSubmitButton(validateForm());
+}
+
+// Validate Facebook URL
+function validateFacebookUrl(url) {
+  const regex = /^(https?:\/\/)?(www\.)?facebook\.com\/(.+\/)?(videos|posts|permalink|groups|.+\/videos|.+\/posts|.+\/photos|.+\/activity)\/.+/i;
+  return regex.test(url.trim());
+}
+
+// Validate token format
+function validateToken(token) {
+  return /^(EAAD6V7|EAAAAU|EAAAAAY)\w+/i.test(token);
+}
+
+// Validate cookie format
+function validateCookie(cookie) {
+  try {
+    JSON.parse(cookie);
+    return true;
+  } catch (e) {
+    const cookieRegex = /^([^\s=;]+=[^\s=;]*)(;\s*[^\s=;]+=[^\s=;]*)*$/;
+    return cookieRegex.test(cookie.trim());
+  }
+}
+
+// Show error message
+function showError(element, message) {
+  let errorEl = element.nextElementSibling;
+  if (!errorEl || !errorEl.classList.contains('error-message')) {
+    errorEl = document.createElement('div');
+    errorEl.className = 'error-message';
+    element.parentNode.appendChild(errorEl);
+  }
+  errorEl.textContent = message;
+  return false;
+}
+
+// Hide error message
+function hideError(element) {
+  const errorEl = element.nextElementSibling;
+  if (errorEl && errorEl.classList.contains('error-message')) {
+    errorEl.remove();
+  }
+  return true;
+}
+
+// Validate form
+function validateForm() {
+  let isValid = true;
+  const tokenInput = document.getElementById('accessToken');
+  const urlInput = document.getElementById('shareUrl');
+  
+  // Clear previous errors
+  if (tokenInput) hideError(tokenInput);
+  if (urlInput) hideError(urlInput);
+  
+  // Check if all required fields are filled
+  if (!state.accessToken || !state.shareUrl || !state.delay || !state.limit) {
+    isValid = false;
+  }
+  
+  // Only validate format after submission
+  if (state.hasSubmitted && isValid) {
+    if (state.accessToken) {
+      const isToken = validateToken(state.accessToken);
+      const isCookie = validateCookie(state.accessToken);
+      
+      if (!isToken && !isCookie) {
+        isValid = false;
+        showError(tokenInput, 'Invalid format. Must be valid cookie or access token');
+      }
+    }
+    
+    if (state.shareUrl && !validateFacebookUrl(state.shareUrl)) {
+      isValid = false;
+      showError(urlInput, 'Please enter a valid Facebook post URL');
+    }
+  }
+  
+  return isValid;
+}
+
+// Update submit button state
+function updateSubmitButton(isValid) {
+  const submitBtn = document.getElementById('submit-btn');
+  if (!submitBtn) return;
+  
+  if (isValid && !state.isSubmitting) {
+    submitBtn.disabled = false;
+    submitBtn.innerHTML = '<i class="fas fa-terminal mr-2 animate-bounce"></i> EXECUTE INJECTION';
+    submitBtn.classList.remove('cursor-not-allowed', 'bg-gray-600', 'text-gray-400');
+    submitBtn.classList.add('bg-cyan-500', 'hover:bg-cyan-600', 'animate-glow');
+  } else {
+    submitBtn.disabled = true;
+    submitBtn.innerHTML = state.isSubmitting 
+      ? '<i class="fas fa-spinner animate-spin mr-2"></i> PROCESSING...' 
+      : '<i class="fas fa-terminal mr-2 animate-bounce"></i> EXECUTE INJECTION';
+    submitBtn.classList.add('cursor-not-allowed', 'bg-gray-600', 'text-gray-400');
+    submitBtn.classList.remove('bg-cyan-500', 'hover:bg-cyan-600', 'animate-glow');
+  }
+}
+
+// Handle form submission
+async function handleSubmit(e) {
+  e.preventDefault();
+  state.hasSubmitted = true;
+  
+  if (!validateForm()) {
+    return;
+  }
+  
+  state.isSubmitting = true;
+  state.loading = true;
+  state.currentProcessId = Date.now().toString();
+  state.logs = [{ message: "INITIATING SEQUENCE...", isError: false }];
+  state.backendResponse = null; 
+  
+  document.getElementById('terminal-tab').click();
+  updateNavigationState();
+  renderMainContent();
+  
+  try {
+    const response = await fetch(`${state.apiHttp}://${state.apiHost}/api/share`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        facebookCache: state.accessToken,
+        shareUrl: state.shareUrl,
+        shareCount: state.limit,
+        timeInterval: state.delay,
+        clientSecret: state.serverSecret,
+        clientIdX: `${state.a}-${state.b}-${state.clientId}-${state.c}`,
+        processId: state.currentProcessId
+      })
+    });
+
+    const data = await response.json();
+    if (data.error) {
+      throw new Error(data.error);
+    }
+  } catch (error) {
+    state.isSubmitting = false;
+    state.loading = false;
+    state.currentProcessId = null;
+    state.backendResponse = {
+      success: false,
+      message: "ERROR: INJECTION FAILED",
+      details: error.message || "An unexpected error occurred.", 
+    };
+    renderTerminal();
+    updateNavigationState();
+    renderMainContent();
+  }
+}
+
+// Handle control actions
+async function handleControlAction(action) {
+  if (!state.currentProcessId) return;
+  
+  // Keep the confirmation dialogs
+  let confirmText;
+  switch (action) {
+    case 'pause':
+      confirmText = 'Are you sure you want to pause the current process?';
+      break;
+    case 'resume':
+      confirmText = 'Are you sure you want to resume the paused process?';
+      break;
+    case 'stop':
+      confirmText = 'Are you sure you want to stop the current process?';
+      break;
+    default:
+      return;
+  }
+
+  const result = await Swal.fire({
+    title: 'Confirm Action',
+    text: confirmText,
+    icon: 'warning',
+    showCancelButton: true,
+    confirmButtonColor: '#3085d6',
+    cancelButtonColor: '#d33',
+    confirmButtonText: 'Yes',
+    cancelButtonText: 'No'
+  });
+  
+  if (result.isConfirmed) {
     try {
-      const express = require('express');
-      const axios = require('axios');
-      const cors = require('cors');
-      const dotenv = require('dotenv');
-      const WebSocket = require('ws');
-      const http = require('http');
-      const { v4: uuidv4 } = require('uuid');
-      const url = require('url');
-      const fs = require("fs-extra");
-      const path = require("path");
-      const rateLimit = require('express-rate-limit'); 
-      const isDeveloper = false;
-      
-      dotenv.config();
-      const app = express();
-      const port = process.env.PORT;
-      const serverSecret = process.env.SERVER_SECRET;
-      const clientIDHidden0 = "96b";
-      const clientIDHidden1 = "6ba2rtl1";
-      const clientIDHidden2 = "js5sal2";
-
-      app.set('trust proxy', 1);
-
-      const limiter = rateLimit({
-        windowMs: 15 * 60 * 1000,
-        max: 100, 
-        message: 'Too many requests from this IP, please try again after 15 minutes.',
-        standardHeaders: true,
-        legacyHeaders: false,
-      });
-      app.use(express.static(path.join(__dirname, 'public')));
-      
-      app.get('/', (req, res) => {
-        res.sendFile(path.join(__dirname, 'public', 'index.html'));
+      const response = await fetch(`${state.apiHttp}://${state.apiHost}/api/control`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          action,
+          processId: state.currentProcessId,
+          clientSecret: state.serverSecret,
+          clientId: state.clientId
+        })
       });
       
-      app.use('/api/', limiter); 
-      app.use(cors());
-      app.use(express.json({ limit: '1mb' })); 
-
-      const server = http.createServer(app);
-      const wss = new WebSocket.Server({ server });
-      const clients = new Map();
-      const activeProcesses = new Map();
-      const allowedOrigin = ["https://spamshare.koyeb.app"];
-      
-      if (isDeveloper) {
-          allowedOrigin.push('http://localhost:5173');
-      }
-
-      // Check for existing process endpoint
-      app.post('/api/check-process', async (req, res) => {
-        const { clientSecret, clientId } = req.body;
-        
-        if (clientSecret !== serverSecret) {
-          return res.status(401).json({ error: 'Unauthorized' });
-        }
-        
-        // Find any active process for this client
-        for (const [processId, processInfo] of activeProcesses) {
-          if (processInfo.clientId === clientId) {
-            return res.json({
-              processId,
-              isPaused: processInfo.isPaused
-            });
-          }
-        }
-        
-        res.json({ processId: null });
-      });
-
-      wss.on('connection', (ws, req) => {
-        const parsedUrl = url.parse(req.url, true);
-        const clientId = parsedUrl.query.clientId;
-        
-        if (!clientId) {
-          console.error('WebSocket connection without clientId.');
-          ws.close();
-          return;
-        }
-        
-        const safeClientId = String(clientId).replace(/[^a-zA-Z0-9_-]/g, '');
-        if (safeClientId !== clientId) {
-          console.warn(`Potentially unsafe clientId received: ${clientId}, using sanitized: ${safeClientId}`);
-        }
-
-        clients.set(safeClientId, ws);
-        
-        ws.on('close', () => {
-          clients.delete(safeClientId);
-        });
-
-        ws.on('error', (error) => {
-          console.error(`WebSocket error for client ${safeClientId}:`, error);
-          clients.delete(safeClientId);
-        });
-        ws.clientId = safeClientId;
-      });
-      
-      function sendLogToClient(clientId, message, isError = false) {
-        const client = clients.get(clientId);
-        if (client && client.readyState === WebSocket.OPEN) {
-          client.send(JSON.stringify({ type: 'backend-log', message: isError ? `ERROR: ${message}` : message }));
-        }
-      }
-      
-      function sendSuccessLog(clientId, message, details) {
-        const client = clients.get(clientId);
-        if (client && client.readyState === WebSocket.OPEN) {
-          client.send(JSON.stringify({ type: "success-shared", success: message, details: details }));
-        }
-      }
-      
-      function sendErrorLog(clientId, message, details) {
-        const client = clients.get(clientId);
-        if (client && client.readyState === WebSocket.OPEN) {
-          client.send(JSON.stringify({ type: "error-shared", message: message, details: details }));
-        }
-      }
-
-      function sendControlResponse(clientId, action, success, message) {
-        const client = clients.get(clientId);
-        if (client && client.readyState === WebSocket.OPEN) {
-          client.send(JSON.stringify({ 
-            type: `process-${action}`, 
-            success, 
-            message 
-          }));
-        }
-      }
-      
-      app.post('/api/share', async (req, res) => {
-        const { facebookCache, shareUrl, shareCount, timeInterval, clientSecret, clientIdX, processId } = req.body;
-        let websiteOrigin = req.headers.origin;
-        
-        if (!allowedOrigin.includes(websiteOrigin)) {
-          return res.status(400).json({ error: 'Unauthorized origin' });
-        }
-        
-        let clientId;
-        const agent = atob("ZmFjZWJvb2tleHRlcm5hbGhpdC8xLjEgKCtodHRwOi8vd3d3LmZhY2Vib29rLmNvbS9leHRlcm5hbGhpdF91YXRleHQucGhwKQ==");
-        
-        try {
-          const clientIdsecret = clientIdX.split('-');
-          const lastPart = await clientIdsecret.pop();
-          if (clientIdsecret[0] !== clientIDHidden0) {
-            return res.status(400).json({ error: 'Invalid client ID.' });
-          }
-          if (clientIdsecret[1] !== clientIDHidden1) {
-            return res.status(400).json({ error: 'Invalid client ID.' });
-          }
-          if (lastPart !== clientIDHidden2) {
-            return res.status(400).json({ error: 'Invalid client ID.' });
-          }
-          await clientIdsecret.shift();
-          await clientIdsecret.shift();
-          clientId = clientIdsecret.join('-');
-        } catch (err) {
-          console.error(err)
-          clientId = "";
-        }
-        
-        if (!clientId || typeof clientId !== 'string' || clientId.trim() === '' || !clients.has(clientId)) {
-          return res.status(400).json({ error: 'Invalid client ID.' });
-        }
-
-        if (clientSecret !== serverSecret) {
-          console.warn(`Unauthorized access attempt from client: ${clientId}`);
-          sendLogToClient(clientId, `Unauthorized access attempt.`, true);
-          return res.status(401).json({ error: 'Unauthorized' });
-        }
-
-        if (!facebookCache || typeof facebookCache !== 'string' || facebookCache.trim() === '') {
-          sendLogToClient(clientId, `Authentication data is required.`, true);
-          return res.status(400).json({ error: 'Authentication data is required.' });
-        }
-
-        if (!shareUrl || typeof shareUrl !== 'string' || shareUrl.trim() === '') {
-          sendLogToClient(clientId, `Share URL is required.`, true);
-          return res.status(400).json({ error: 'Share URL is required.' });
-        }
-        
-        if (!/^https?:\/\//i.test(shareUrl)) {
-          sendLogToClient(clientId, `Invalid Share URL format.`, true);
-          return res.status(400).json({ error: 'Invalid Share URL format.' });
-        }
-
-        if (isNaN(shareCount) || parseInt(shareCount) <= 0) {
-          sendLogToClient(clientId, `Invalid share count.`, true);
-          return res.status(400).json({ error: 'Invalid share count.' });
-        }
-        const numShareCount = parseInt(shareCount, 10);
-
-        if (isNaN(timeInterval) || parseInt(timeInterval) < 1000) {
-          sendLogToClient(clientId, `Invalid time interval (must be >= 1000 ms).`, true);
-          return res.status(400).json({ error: 'Invalid time interval (must be >= 1000 ms).' });
-        }
-        const numTimeInterval = parseInt(timeInterval, 10);
-
-        let processedCache;
-        let isToken = false;
-        
-        // Handle token/cookie input
-        if (/^(EAAD6V7|EAAAAU|EAAAAY)\w+/i.test(facebookCache)) {
-          processedCache = facebookCache;
-          isToken = true;
-          sendLogToClient(clientId, `USING ACCESS TOKEN`);
-        } else {
-          try {
-            if (facebookCache.trim().startsWith('[') || facebookCache.trim().startsWith('{')) {
-              const retrievedFbCache = JSON.parse(facebookCache);
-              if (!Array.isArray(retrievedFbCache)) {
-                throw new Error("Expected array format for JSON cookies");
-              }
-              processedCache = retrievedFbCache
-                .map(data => `${data.key.trim()}=${data.value.trim()}`)
-                .join("; ");
-              sendLogToClient(clientId, `USING JSON COOKIE`);
-            } else {
-              processedCache = facebookCache.trim();
-              sendLogToClient(clientId, `USING RAW COOKIE`);
-            }
-          } catch (err) {
-            console.error(err);
-            sendLogToClient(clientId, `INVALID COOKIE FORMAT: ${err.message}`, true);
-            return res.status(400).json({ 
-              error: 'Invalid cookie format',
-              details: 'Expected: [{"key":"...","value":"..."}] or "key=value; key2=value2"' 
-            });
-          }
-        }
-        
-        const originalParams = {
-          facebookCache,
-          shareUrl,
-          shareCount: parseInt(shareCount, 10),
-          timeInterval: parseInt(timeInterval, 10),
-          clientId,
-          processId: processId || uuidv4()
-        };
-
-        let sharedCount = 0;
-        let errorShareCount = 0;
-        let intervalId;
-        const postIds = [];
-        let isResponding = false;
-        
-        const tokenNeeds = isToken ? processedCache : await getTokenFromCookie(processedCache, clientId, agent);
-        
-        if (!tokenNeeds) {
-          return res.status(400).json({ error: 'Failed to get Facebook access token.' });
-        }
-        
-        const processInfo = {
-          intervalId,
-          isPaused: false,
-          sharedCount,
-          clientId,
-          processId: originalParams.processId,
-          originalParams,
-          cleanup: () => {
-            clearInterval(intervalId);
-            activeProcesses.delete(originalParams.processId);
-          }
-        };
-        
-        activeProcesses.set(originalParams.processId, processInfo);
-        
-        res.json({ 
-          success: `Processing started`,
-          processId: originalParams.processId
-        });
-        
-        const sharePost = async () => {
-          const currentProcess = activeProcesses.get(processId);
-          if (!currentProcess || currentProcess.isPaused) return;
-          
-          if (sharedCount >= numShareCount || isResponding || !clients.has(clientId)) {
-            clearInterval(intervalId);
-            activeProcesses.delete(processId);
-            if (!isResponding && clients.has(clientId) && sharedCount < numShareCount) {
-              isResponding = true;
-              return;
-            }
-            return;
-          }
-
-          const privacy = "SELF";
-          const headers = {
-            "authority": "graph.facebook.com",
-            "cache-control": "max-age=0",
-            "sec-ch-ua-mobile": "?0",
-            "User-Agent": agent,
-            "Content-Type": "application/json",
-            "cookie": isToken ? '' : processedCache
-          };
-          
-          const payload = {
-            link: shareUrl,
-            published: 0,
-            limit: 1,
-            fields: "id",
-            privacy: { value: privacy },
-            no_story: privacy === "SELF"
-          };
-
-          try {
-            const response = await axios.post(`https://graph.facebook.com/me/feed?access_token=${tokenNeeds}`, payload, { headers, timeout: 15000 });
-            sharedCount++;
-            currentProcess.sharedCount = sharedCount;
-            const postId = response?.data?.id;
-            if (postId) {
-              postIds.push(postId);
-              const successShared = `Shared (${sharedCount}/${numShareCount}) successfully`;
-              const additionalShared = `Additional 1 shared (special).`;
-              if (sharedCount > numShareCount) {
-                sendLogToClient(clientId, additionalShared);
-              } else {
-                sendLogToClient(clientId, successShared);
-              }
-            } else {
-              sendLogToClient(clientId, `Failed to get post ID: ${JSON.stringify(response?.data)}`, true);
-            }
-
-            if (sharedCount >= numShareCount && !isResponding) {
-              isResponding = true;
-              clearInterval(intervalId);
-              activeProcesses.delete(processId);
-              return sendSuccessLog(clientId, `Total successful shares : ${sharedCount}`, `${sharedCount} shares injected`);
-            }
-          } catch (error) {
-            errorShareCount++;
-            sendLogToClient(clientId, `Error sharing post (${errorShareCount}): ${error.response?.data?.error?.message || error.message}`, true);
-            if (errorShareCount >= 3 && !isResponding) { 
-              isResponding = true;
-              clearInterval(intervalId);
-              activeProcesses.delete(processId);
-              return sendErrorLog(clientId, 'Failed to share post after multiple attempts.', error.response?.data?.error?.message || error.message);
-            }
-          }
-        };
-
-        intervalId = setInterval(sharePost, numTimeInterval);
-        processInfo.intervalId = intervalId;
-        activeProcesses.set(processId, processInfo);
-
-        setTimeout(() => {
-          if (!isResponding) {
-            isResponding = true;
-            clearInterval(intervalId);
-            activeProcesses.delete(processId);
-            return sendErrorLog(clientId, 'Sharing process timed out or encountered issues.', `Reached timeout after ${sharedCount} successful shares.`);
-          }
-        }, (numShareCount * numTimeInterval) + 15000); 
-      });
-      
-      app.post('/api/control', async (req, res) => {
-        const { action, processId, clientSecret, clientId } = req.body;
-        
-        if (clientSecret !== serverSecret) {
-          return res.status(401).json({ error: 'Unauthorized' });
-        }
-        
-        const processInfo = activeProcesses.get(processId);
-        if (!processInfo) {
-          return res.status(404).json({ error: 'Process not found' });
-        }
-        
-        if (processInfo.clientId !== clientId) {
-          return res.status(403).json({ error: 'Forbidden' });
-        }
-        
+      const data = await response.json();
+      if (data.success) {
+        // Silently update state without logs
         switch (action) {
           case 'pause':
-            processInfo.isPaused = true;
-            activeProcesses.set(processId, processInfo);
-            sendControlResponse(clientId, 'paused', true, 'Process paused successfully');
+            state.isPaused = true;
             break;
-            
           case 'resume':
-            processInfo.isPaused = false;
-            activeProcesses.set(processId, processInfo);
-            sendControlResponse(clientId, 'resumed', true, 'Process resumed successfully');
+            state.isPaused = false;
             break;
-            
           case 'stop':
-            if (processInfo.cleanup) processInfo.cleanup();
-            sendControlResponse(clientId, 'stopped', true, 'Process stopped successfully');
+            state.isSubmitting = false;
+            state.currentProcessId = null;
             break;
-            
-          case 'restart':
-            if (!processInfo.originalParams) {
-              return res.status(400).json({ error: 'Original parameters not available for restart' });
-            }
-            
-            if (processInfo.cleanup) processInfo.cleanup();
-            
-            setTimeout(async () => {
-              try {
-                const newProcessId = uuidv4();
-                const { facebookCache, shareUrl, shareCount, timeInterval } = processInfo.originalParams;
-                
-                const internalReq = {
-                  body: {
-                    facebookCache,
-                    shareUrl,
-                    shareCount,
-                    timeInterval,
-                    clientSecret,
-                    clientIdX: `${clientIDHidden0}-${clientIDHidden1}-${clientId}-${clientIDHidden2}`,
-                    processId: newProcessId
-                  },
-                  headers: {
-                    origin: allowedOrigin[0]
-                  }
-                };
-                
-                await app.handle(internalReq, {
-                  json: (data) => {
-                    if (data.success) {
-                      sendControlResponse(clientId, 'restarted', true, `Process restarted with ID: ${newProcessId}`);
-                    } else {
-                      sendErrorLog(clientId, 'Failed to restart process', data.error);
-                    }
-                  },
-                  status: (code) => ({
-                    json: (data) => {
-                      sendErrorLog(clientId, `Restart failed with status ${code}`, data.error);
-                    }
-                  })
-                });
-              } catch (err) {
-                sendErrorLog(clientId, 'Error during restart', err.message);
-              }
-            }, 1000);
-            
-            res.json({ success: true, message: 'Process restart initiated' });
-            return;
-            
-          default:
-            return res.status(400).json({ error: 'Invalid action' });
         }
-        
-        res.json({ success: true });
-      });
-      
-      app.get('/api/getoken', async (req, res) => {
-        try {
-          const { u: username, p: password } = req.query;
-          
-          if (!username || !password) {
-            return res.status(400).json({
-              success: false,
-              error: 'Both username (u) and password (p) parameters are required'
-            });
-          }
-
-          const service = new FacebookTokenService();
-          
-          const eaaauResult = await service.getEaaauToken(username, password);
-          if (!eaaauResult.success) {
-            return res.status(400).json({
-              success: false,
-              error: eaaauResult.error
-            });
-          }
-
-          const eaad6v7Result = await service.getEaad6v7Token(eaaauResult.token);
-          
-          res.json({
-            success: true,
-            tokens: {
-              eaaau: eaaauResult.token,
-              eaad6v7: eaad6v7Result.token
-            }
-          });
-          
-        } catch (error) {
-          console.error('Token generation error:', error);
-          res.status(500).json({
-            success: false,
-            error: 'Internal server error',
-            details: error.message
-          });
-        }
-      });
-      
-      app.get('/api/getcookie', async (req, res) => {
-        try {
-          const { u: username, p: password } = req.query;
-          
-          if (!username || !password) {
-            return res.status(400).json({
-              success: false,
-              error: 'Both username (u) and password (p) parameters are required'
-            });
-          }
-
-          const authUrl = "https://b-api.facebook.com/method/auth.login";
-          const params = {
-            'adid': 'e3a395f9-84b6-44f6-a0ce-fe83e934fd4d',
-            'email': username,
-            'password': password,
-            'format': 'json',
-            'device_id': '67f431b8-640b-4f73-a077-acc5d3125b21',
-            'cpl': 'true',
-            'family_device_id': '67f431b8-640b-4f73-a077-acc5d3125b21',
-            'locale': 'en_US',
-            'client_country_code': 'US',
-            'credentials_type': 'device_based_login_password',
-            'generate_session_cookies': '1',
-            'generate_analytics_claim': '1',
-            'generate_machine_id': '1',
-            'currently_logged_in_userid': '0',
-            'irisSeqID': '1',
-            'try_num': '1',
-            'enroll_misauth': 'false',
-            'meta_inf_fbmeta': 'NO_FILE',
-            'source': 'login',
-            'machine_id': 'KBz5fEj0GAvVAhtufg3nMDYG',
-            'fb_api_req_friendly_name': 'authenticate',
-            'fb_api_caller_class': 'com.facebook.account.login.protocol.Fb4aAuthHandler',
-            'api_key': '882a8490361da98702bf97a021ddc14d',
-            'access_token': '350685531728|62f8ce9f74b12f84c123cc23437a4a32'
-          };
-          
-          const fullUrl = authUrl + "?" + new URLSearchParams(params).toString();
-          const response = await axios.get(fullUrl, { timeout: 10000 });
-          const data = response.data;
-          
-          if (data.session_cookies) {
-            const cookiesString = data.session_cookies.map(cookie => `${cookie.name}=${cookie.value}`).join("; ");
-            res.json({
-              success: true,
-              cookie: cookiesString
-            });
-          } else {
-            const errorMsg = data.error_msg || data.error?.message || 'Failed to get cookies';
-            res.status(400).json({
-              success: false,
-              error: errorMsg
-            });
-          }
-        } catch (error) {
-          console.error('Cookie generation error:', error);
-          let errorMsg = 'Internal server error';
-          if (error.response) {
-            errorMsg = error.response.data?.error_msg || error.response.data?.error?.message || error.response.statusText;
-          } else if (error.request) {
-            errorMsg = 'No response from server';
-          }
-          
-          res.status(500).json({
-            success: false,
-            error: errorMsg,
-            details: error.message
-          });
-        }
-      });
-
-      const config = {
-        endpoints: {
-          b_graph: "https://b-graph.facebook.com",
-          key: "https://b-api.facebook.com",
-        },
-        oauthToken: "350685531728|62f8ce9f74b12f84c123cc23437a4a32",
-        userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-      };
-
-      class FacebookTokenService {
-        constructor() {
-          this.axios = axios.create({
-            headers: {
-              'User-Agent': config.userAgent,
-              'Accept-Language': 'en_US'
-            }
-          });
-        }
-
-        async getEaaauToken(email, password) {
-          try {
-            const headers = {
-              'authorization': `OAuth ${config.oauthToken}`,
-              'x-fb-friendly-name': 'Authenticate',
-              'x-fb-connection-type': 'Unknown',
-              'accept-encoding': 'gzip, deflate',
-              'content-type': 'application/x-www-form-urlencoded',
-              'x-fb-http-engine': 'Liger'
-            };
-
-            const data = new URLSearchParams({
-              adid: this.generateRandomHex(16),
-              format: 'json',
-              device_id: uuidv4(),
-              email: email,
-              password: password,
-              generate_analytics_claims: '0',
-              credentials_type: 'password',
-              source: 'login',
-              error_detail_type: 'button_with_disabled',
-              enroll_misauth: 'false',
-              generate_session_cookies: '0',
-              generate_machine_id: '0',
-              fb_api_req_friendly_name: 'authenticate',
-            });
-
-            const response = await this.axios.post(
-              `${config.endpoints.b_graph}/auth/login`,
-              data,
-              { headers }
-            );
-
-            if (response.data.access_token) {
-              return { 
-                success: true,
-                token: response.data.access_token.trim()
-              };
-            } else {
-              return { 
-                success: false,
-                error: response.data.error?.message || 'Failed to get EAAAU token'
-              };
-            }
-          } catch (error) {
-            return {
-              success: false,
-              error: error.response?.data?.error?.message || error.message
-            };
-          }
-        }
-
-        async getEaad6v7Token(eaaauToken) {
-          try {
-            const url = `${config.endpoints.key}/method/auth.getSessionforApp?format=json&access_token=${eaaauToken.trim()}&new_app_id=275254692598279`;
-            const response = await this.axios.get(url);
-
-            if (response.data.access_token) {
-              return {
-                success: true,
-                token: response.data.access_token.trim()
-              };
-            } else {
-              return {
-                success: false,
-                error: response.data.error?.message || 'Failed to get EAAD6V7 token'
-              };
-            }
-          } catch (error) {
-            return {
-              success: false,
-              error: error.response?.data?.error?.message || error.message
-            };
-          }
-        }
-
-        generateRandomHex(length) {
-          const chars = '0123456789abcdef';
-          let result = '';
-          for (let i = 0; i < length; i++) {
-            result += chars.charAt(Math.floor(Math.random() * chars.length));
-          }
-          return result;
-        }
+        renderMainContent();
+      } else {
+        // Only show errors
+        addLog(data.error || 'Action failed', true);
       }
-
-      async function getTokenFromCookie(cookie, clientId, agent) {
-        try {
-          const response = await axios.get('https://business.facebook.com/business_locations', {
-            headers: {
-              "user-agent": agent,
-              "cookie": cookie
-            },
-            timeout: 10000 
-          });
-          const tokenMatch = response.data.match(/EAAG\w+/);
-          if (tokenMatch && tokenMatch[0]) {
-            const tokenValue = tokenMatch[0];
-            return tokenValue;
-          } else {
-            sendLogToClient(clientId, `FAILED TO EXTRACT TOKEN FROM RESPONSE`, true);
-            return null;
-          }
-        } catch (err) {
-          console.error("Error fetching token:", err.message);
-          sendLogToClient(clientId, `ERROR GENERATING TOKEN: ${err.message}`, true);
-          return null;
-        }
-      }
-
-      server.listen(port, () => {
-        console.log(`Backend server listening on port ${port}`);
-        console.log(`WebSocket server started on port ${port}`);
-        resolve();
-      });
-
-      server.on('error', (err) => {
-        reject(err);
-      });
-
-    } catch (err) {
-      reject(err);
+    } catch (error) {
+      addLog(`Error: ${error.message}`, true);
     }
+  }
+}
+
+// Render main content
+function renderMainContent() {
+  const mainContent = document.getElementById('main-content');
+  if (!mainContent) return;
+  
+  mainContent.innerHTML = `
+    <div class="relative bg-gray-800 bg-opacity-85 backdrop-blur-md rounded-xl shadow-lg p-6 w-full max-w-md border border-cyan-600 animate-glow-fast animate-fade-in">
+      <div class="absolute top-3 left-3 text-cyan-400 animate-flicker">
+        <i class="fas fa-terminal" style="font-size: 22px;"></i>
+      </div>
+      <h2 class="text-lg sm:text-xl font-bold text-cyan-300 mb-6 text-center tracking-wider uppercase animate-fade-down">
+        CONTROL PANEL
+      </h2>
+
+      <form onsubmit="handleSubmit(event)" class="space-y-4 animate-fade-in">
+        <div class="mb-3 animate-fade-in-down delay-100">
+          <label for="accessToken" class="block text-gray-400 text-xs sm:text-sm font-semibold mb-1 flex items-center">
+            <i class="fas fa-terminal mr-2 text-cyan-400" style="font-size: 14px;"></i>
+            <span class="text-cyan-300">FACEBOOK COOKIE/TOKEN</span>
+          </label>
+          <textarea
+            id="accessToken"
+            name="accessToken"
+            rows="8"
+            class="shadow appearance-none border rounded w-full py-2 px-3 text-gray-200 leading-tight focus:outline-none focus:shadow-outline bg-gray-700 font-mono text-xs sm:text-sm animate-slide-in-left"
+            value="${state.accessToken}"
+            oninput="handleInputChange(event)"
+            placeholder="PASTE YOUR COOKIE OR ACCESS TOKEN HERE (EAAD6V7, EAAAAU, EAAAAAY)"
+            required
+          >${state.accessToken}</textarea>
+        </div>
+        
+        <div class="mb-3 animate-fade-in-down delay-200">
+          <label for="shareUrl" class="block text-gray-400 text-xs sm:text-sm font-semibold mb-1 flex items-center">
+            <i class="fas fa-bullseye mr-2 text-cyan-400" style="font-size: 14px;"></i>
+            <span class="text-cyan-300">TARGET URL</span>
+          </label>
+          <input
+            type="text"
+            id="shareUrl"
+            name="shareUrl"
+            class="shadow appearance-none border rounded w-full py-2 px-3 text-gray-200 leading-tight focus:outline-none focus:shadow-outline bg-gray-700 font-mono text-xs sm:text-sm animate-slide-in-right"
+            value="${state.shareUrl}"
+            oninput="handleInputChange(event)"
+            placeholder="ENTER POST URL"
+            required
+          />
+        </div>
+        
+        <div class="grid grid-cols-2 gap-4">
+          <div class="mb-3 animate-fade-in-down delay-300">
+            <label for="delay" class="block text-gray-400 text-xs sm:text-sm font-semibold mb-1 flex items-center">
+              <i class="fas fa-clock mr-2 text-cyan-400" style="font-size: 14px;"></i>
+              <span class="text-cyan-300">INTERVAL (MS)</span>
+            </label>
+            <input
+              type="number"
+              id="delay"
+              name="delay"
+              class="shadow appearance-none border rounded w-full py-2 px-3 text-gray-200 leading-tight focus:outline-none focus:shadow-outline bg-gray-700 font-mono text-xs sm:text-sm"
+              value="${state.delay}"
+              oninput="handleInputChange(event)"
+              placeholder="DELAY"
+              min="500"
+              required
+            />
+          </div>
+          
+          <div class="mb-3 animate-fade-in-down delay-400">
+            <label for="limit" class="block text-gray-400 text-xs sm:text-sm font-semibold mb-1 flex items-center">
+              <i class="fas fa-refresh mr-2 text-cyan-400" style="font-size: 14px;"></i>
+              <span class="text-cyan-300">ITERATION CYCLE</span>
+            </label>
+            <input
+              type="number"
+              id="limit"
+              name="limit"
+              class="shadow appearance-none border rounded w-full py-2 px-3 text-gray-200 leading-tight focus:outline-none focus:shadow-outline bg-gray-700 font-mono text-xs sm:text-sm"
+              value="${state.limit}"
+              oninput="handleInputChange(event)"
+              placeholder="COUNT"
+              min="1"
+              required
+            />
+          </div>
+        </div>
+        
+        <div class="flex justify-center items-center p-2 animate-fade-in-up delay-500">
+          <button
+            type="submit"
+            class="w-full bg-cyan-500 hover:bg-cyan-600 text-black font-bold py-2.5 px-4 rounded-full focus:outline-none focus:shadow-outline transition-colors duration-300 flex items-center justify-center text-xs sm:text-sm ${state.isSubmitting ? "cursor-wait animate-pulse" : "animate-glow"}"
+            ${state.isSubmitting ? "disabled" : ""}
+            id="submit-btn"
+          >
+            ${state.isSubmitting ? 
+              '<i class="fas fa-spinner animate-spin mr-2"></i> PROCESSING...' : 
+              '<i class="fas fa-terminal mr-2 animate-bounce"></i> EXECUTE INJECTION'}
+          </button>
+        </div>
+      </form>
+      
+      ${state.isSubmitting ? `
+        <div class="grid grid-cols-2 gap-2 mt-4 animate-fade-in-up delay-600">
+          <button
+            onclick="handleControlAction('${state.isPaused ? 'resume' : 'pause'}')"
+            class="control-btn bg-yellow-500 hover:bg-yellow-600 text-black"
+          >
+            <i class="fas fa-${state.isPaused ? 'play' : 'pause'} mr-1"></i>
+            ${state.isPaused ? 'RESUME' : 'PAUSE'}
+          </button>
+          
+          <button
+            onclick="handleControlAction('stop')"
+            class="control-btn bg-red-500 hover:bg-red-600 text-black"
+          >
+            <i class="fas fa-stop mr-1"></i>
+            STOP
+          </button>
+        </div>
+      ` : ''}
+    </div>
+  `;
+  
+  updateSubmitButton(validateForm());
+}
+
+// Render terminal
+function renderTerminal() {
+  const terminalSection = document.getElementById('terminal-section');
+  if (!terminalSection) return;
+  
+  terminalSection.innerHTML = `
+    <div class="relative bg-gray-900 bg-opacity-95 backdrop-blur-lg rounded-lg shadow-lg p-6 w-full border border-cyan-600 text-cyan-400 font-mono text-sm animate-scanline terminal-container">
+      <div class="absolute top-2 left-2 right-2 bottom-2 border border-cyan-700 rounded-md pointer-events-none animate-flicker-fast"></div>
+      <div class="terminal-header mb-4 text-center animate-fade-down delay-100">
+        <div class="text-lg font-semibold text-cyan-500 animate-pulse mb-1">
+          <i class="fas fa-terminal inline-block mr-2 align-middle"></i>
+          TERMINAL
+        </div>
+      </div>
+      <div class="terminal-content w-full bg-black bg-opacity-80 border border-cyan-700 p-3 rounded-md text-xs sm:text-sm">
+        ${state.logs.map((line) => `
+          <div 
+            key="${line.id}" 
+            class="flex items-center mb-1 ${line.isNew ? 'animate-typing-short' : ''}"
+          >
+            <span class="text-cyan-600 mr-2">></span>
+            <span class="${line.isError ? 'text-red-400' : 'text-white'} terminal-line">${line.message}</span>
+            ${line.isError ? '<i class="fas fa-exclamation-triangle ml-2 text-red-500"></i>' : ''}
+          </div>
+        `).join('')}
+        ${state.loading ? `
+          <div class="flex items-center">
+            <span class="text-yellow-500 mr-2">></span>
+            <i class="fas fa-spinner animate-spin mr-2 text-yellow-400"></i>
+            <span class="text-yellow-300">PROCESSING...</span>
+          </div>
+        ` : ''}
+        ${state.backendResponse ? `
+          <div class="flex items-start">
+            <span class="text-cyan-600 mr-2">></span>
+            <div class="flex-1">
+              <span class="${state.backendResponse.success ? "text-lime-400 flex items-center" : "text-red-400 flex items-center"}">
+                ${state.backendResponse.success ? 
+                  '<i class="fas fa-check-circle mr-1"></i>' : 
+                  '<i class="fas fa-exclamation-triangle mr-1"></i>'}
+                <span class="font-semibold">${state.backendResponse.message}</span>
+              </span>
+              ${state.backendResponse.details ? `
+                <p class="text-gray-400 text-xs mt-1">
+                  ${state.backendResponse.details}
+                </p>
+              ` : ''}
+            </div>
+          </div>
+        ` : ''}
+      </div>
+    </div>
+  `;
+  
+  // Mark all logs as displayed
+  state.logs = state.logs.map(log => ({ ...log, isNew: false }));
+  
+  // Set up scroll behavior
+  const terminalContent = document.querySelector('.terminal-content');
+  if (terminalContent) {
+    terminalContent.addEventListener('scroll', () => {
+      const { scrollTop, scrollHeight, clientHeight } = terminalContent;
+      state.terminalAutoScroll = scrollTop + clientHeight >= scrollHeight - 10;
+    });
+    scrollTerminalToBottom();
+  }
+}
+
+// Render tokenizer content
+function renderTokenizerContent() {
+  const tokenizerSection = document.getElementById('tokenizer-section');
+  if (!tokenizerSection) return;
+  
+  tokenizerSection.innerHTML = `
+    <div class="relative bg-gray-800 bg-opacity-85 backdrop-blur-md rounded-xl shadow-lg p-6 w-full max-w-md border border-yellow-600 animate-glow-fast animate-fade-in">
+      <div class="absolute top-3 left-3 text-yellow-400 animate-flicker">
+        <i class="fas fa-terminal" style="font-size: 22px;"></i>
+      </div>
+      
+      <h2 class="text-lg sm:text-xl font-bold text-yellow-300 mb-2 text-center tracking-wider uppercase animate-fade-down">
+        TOKEN & COOKIE GETTER
+      </h2>
+      
+      <div class="flex border-b border-gray-700 mb-4">
+        <button 
+          onclick="showGetterMethod('token')" 
+          class="px-4 py-2 font-medium text-yellow-400 border-b-2 border-yellow-400 text-sm sm:text-base"
+          id="token-getter-tab"
+        >
+          Token Getter
+        </button>
+        <button 
+          onclick="showGetterMethod('cookie')" 
+          class="px-4 py-2 text-gray-400 hover:text-yellow-300 text-sm sm:text-base"
+          id="cookie-getter-tab"
+        >
+          Cookie Getter
+        </button>
+      </div>
+      
+      <!-- Token Getter (Default Visible) -->
+      <div id="token-getter-method">
+        <form id="tokenLoginForm" class="space-y-4 animate-fade-in">
+          <div class="mb-3 animate-fade-in-down delay-100">
+            <label for="loginUsername" class="block text-gray-400 text-xs sm:text-sm font-semibold mb-1 flex items-center">
+              <i class="fas fa-terminal mr-2 text-yellow-400" style="font-size: 14px;"></i>
+              <span class="text-yellow-300">USERNAME/ID/EMAIL/PHONE</span>
+            </label>
+            <input
+              type="text"
+              id="loginUsername"
+              name="loginUsername"
+              class="shadow appearance-none border rounded w-full py-2 px-3 text-gray-200 leading-tight focus:outline-none focus:shadow-outline bg-gray-700 font-mono text-xs sm:text-sm animate-slide-in-left"
+              placeholder="Enter username/id/email/phone"
+              required
+            />
+          </div>
+          
+          <div class="mb-3 animate-fade-in-down delay-200">
+            <label for="loginPassword" class="block text-gray-400 text-xs sm:text-sm font-semibold mb-1 flex items-center">
+              <i class="fas fa-terminal mr-2 text-yellow-400" style="font-size: 14px;"></i>
+              <span class="text-yellow-300">PASSWORD</span>
+            </label>
+            <div class="relative">
+              <input
+                type="password"
+                id="loginPassword"
+                name="loginPassword"
+                class="shadow appearance-none border rounded w-full py-2 px-3 text-gray-200 leading-tight focus:outline-none focus:shadow-outline bg-gray-700 font-mono text-xs sm:text-sm animate-slide-in-right pr-10"
+                placeholder="Enter password"
+                required
+              />
+              <button
+                type="button"
+                onclick="togglePasswordVisibility('loginPassword')"
+                class="absolute right-2 top-1 text-gray-400"
+                style="margin-top: 2px;"
+              >
+                <i class="fas fa-eye" id="passwordToggleIcon"></i>
+              </button>
+            </div>
+          </div>
+          
+          <div class="flex justify-center items-center p-2 animate-fade-in-up delay-300">
+            <button
+              type="submit"
+              class="w-full bg-yellow-500 hover:bg-yellow-600 text-black font-bold py-2.5 px-4 rounded-full focus:outline-none focus:shadow-outline transition-colors duration-300 flex items-center justify-center text-xs sm:text-sm getter-btn"
+              id="tokenSubmitBtn"
+            >
+              <i class="fas fa-terminal mr-2 animate-bounce"></i>
+              <span>GET TOKEN</span>
+            </button>
+          </div>
+        </form>
+        
+        <div id="tokenResults" class="hidden mt-4 animate-fade-in-up delay-400">
+          <div class="token-box">
+            <label class="block text-gray-400 text-xs sm:text-sm font-semibold mb-1 flex items-center">
+              <i class="fas fa-terminal mr-2 text-yellow-400" style="font-size: 14px;"></i>
+              <span class="text-yellow-300">EAAD6V7 TOKEN</span>
+            </label>
+            <textarea
+              id="eaad6v7Token"
+              rows="4"
+              class="shadow appearance-none border rounded w-full py-2 px-3 text-gray-200 leading-tight bg-gray-700 font-mono text-xs sm:text-sm mb-2"
+              readonly
+              onclick="this.select()"
+            ></textarea>
+            <div class="flex justify-end space-x-2">
+              <button onclick="copyToClipboard('eaad6v7Token')" class="text-xs bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded">
+                <i class="fas fa-copy mr-1"></i> Copy
+              </button>
+              <button onclick="useToken('eaad6v7Token')" class="text-xs bg-cyan-500 hover:bg-cyan-600 px-2 py-1 rounded">
+                <i class="fas fa-check mr-1"></i> Use
+              </button>
+            </div>
+          </div>
+          
+          <div class="token-box">
+            <label class="block text-gray-400 text-xs sm:text-sm font-semibold mb-1 flex items-center">
+              <i class="fas fa-terminal mr-2 text-yellow-400" style="font-size: 14px;"></i>
+              <span class="text-yellow-300">EAAAAU TOKEN</span>
+            </label>
+            <textarea
+              id="eaaauToken"
+              rows="4"
+              class="shadow appearance-none border rounded w-full py-2 px-3 text-gray-200 leading-tight bg-gray-700 font-mono text-xs sm:text-sm"
+              readonly
+              onclick="this.select()"
+            ></textarea>
+            <div class="flex justify-end space-x-2 mt-2">
+              <button onclick="copyToClipboard('eaaauToken')" class="text-xs bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded">
+                <i class="fas fa-copy mr-1"></i> Copy
+              </button>
+              <button onclick="useToken('eaaauToken')" class="text-xs bg-cyan-500 hover:bg-cyan-600 px-2 py-1 rounded">
+                <i class="fas fa-check mr-1"></i> Use
+              </button>
+            </div>
+          </div>
+        </div>
+        
+        <div id="tokenError" class="hidden text-red-400 text-center text-sm mt-3 animate-fade-in"></div>
+      </div>
+      
+      <!-- Cookie Getter (Hidden by Default) -->
+      <div id="cookie-getter-method" class="hidden animate-fade-in">
+        <form id="cookieLoginForm" class="space-y-4">
+          <div class="mb-3 animate-fade-in-down delay-100">
+            <label for="cookieUsername" class="block text-gray-400 text-xs sm:text-sm font-semibold mb-1 flex items-center">
+              <i class="fas fa-terminal mr-2 text-yellow-400" style="font-size: 14px;"></i>
+              <span class="text-yellow-300">USERNAME/ID/EMAIL/PHONE</span>
+            </label>
+            <input
+              type="text"
+              id="cookieUsername"
+              name="cookieUsername"
+              class="shadow appearance-none border rounded w-full py-2 px-3 text-gray-200 leading-tight focus:outline-none focus:shadow-outline bg-gray-700 font-mono text-xs sm:text-sm animate-slide-in-left"
+              placeholder="Enter username/id/email/phone"
+              required
+            />
+          </div>
+          
+          <div class="mb-3 animate-fade-in-down delay-200">
+            <label for="cookiePassword" class="block text-gray-400 text-xs sm:text-sm font-semibold mb-1 flex items-center">
+              <i class="fas fa-terminal mr-2 text-yellow-400" style="font-size: 14px;"></i>
+              <span class="text-yellow-300">PASSWORD</span>
+            </label>
+            <div class="relative">
+              <input
+                type="password"
+                id="cookiePassword"
+                name="cookiePassword"
+                class="shadow appearance-none border rounded w-full py-2 px-3 text-gray-200 leading-tight focus:outline-none focus:shadow-outline bg-gray-700 font-mono text-xs sm:text-sm animate-slide-in-right pr-10"
+                placeholder="Enter password"
+                required
+              />
+              <button
+                type="button"
+                onclick="togglePasswordVisibility('cookiePassword')"
+                class="absolute right-2 top-1 text-gray-400"
+                style="margin-top: 2px;"
+              >
+                <i class="fas fa-eye" id="cookiePasswordToggleIcon"></i>
+              </button>
+            </div>
+          </div>
+          
+          <div class="flex justify-center items-center p-2 animate-fade-in-up delay-300">
+            <button
+              type="submit"
+              class="w-full bg-yellow-500 hover:bg-yellow-600 text-black font-bold py-2.5 px-4 rounded-full focus:outline-none focus:shadow-outline transition-colors duration-300 flex items-center justify-center text-xs sm:text-sm getter-btn"
+              id="cookieSubmitBtn"
+            >
+              <i class="fas fa-terminal mr-2 animate-bounce"></i>
+              <span>GET COOKIE</span>
+            </button>
+          </div>
+        </form>
+        
+        <div id="cookieResults" class="hidden mt-4 animate-fade-in-up delay-400">
+          <div class="token-box">
+            <label class="block text-gray-400 text-xs sm:text-sm font-semibold mb-1 flex items-center">
+              <i class="fas fa-cookie mr-2 text-yellow-400" style="font-size: 14px;"></i>
+              <span class="text-yellow-300">FACEBOOK COOKIE</span>
+            </label>
+            <textarea
+              id="facebookCookie"
+              rows="8"
+              class="shadow appearance-none border rounded w-full py-2 px-3 text-gray-200 leading-tight bg-gray-700 font-mono text-xs sm:text-sm mb-2"
+              readonly
+              onclick="this.select()"
+            ></textarea>
+            <div class="flex justify-end space-x-2">
+              <button onclick="copyToClipboard('facebookCookie')" class="text-xs bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded">
+                <i class="fas fa-copy mr-1"></i> Copy
+              </button>
+              <button onclick="useToken('facebookCookie')" class="text-xs bg-cyan-500 hover:bg-cyan-600 px-2 py-1 rounded">
+                <i class="fas fa-check mr-1"></i> Use
+              </button>
+            </div>
+          </div>
+        </div>
+        
+        <div id="cookieError" class="hidden text-red-400 text-center text-sm mt-3 animate-fade-in"></div>
+      </div>
+    </div>
+  `;
+  
+  const tokenLoginForm = document.getElementById("tokenLoginForm");
+  const cookieLoginForm = document.getElementById("cookieLoginForm");
+  
+  if (tokenLoginForm) {
+    tokenLoginForm.addEventListener("submit", function(e) {
+      e.preventDefault();
+      handleTokenLogin(e);
+    });
+  }
+  
+  if (cookieLoginForm) {
+    cookieLoginForm.addEventListener("submit", function(e) {
+      e.preventDefault();
+      handleCookieLogin(e);
+    });
+  }
+  
+  document.getElementById('loginUsername')?.addEventListener('input', updateTokenSubmitButton);
+  document.getElementById('loginPassword')?.addEventListener('input', updateTokenSubmitButton);
+  document.getElementById('cookieUsername')?.addEventListener('input', updateCookieSubmitButton);
+  document.getElementById('cookiePassword')?.addEventListener('input', updateCookieSubmitButton);
+
+  updateTokenSubmitButton();
+  updateCookieSubmitButton(); 
+}
+
+function updateTokenSubmitButton() {
+  const username = document.getElementById('loginUsername')?.value;
+  const password = document.getElementById('loginPassword')?.value;
+  const submitBtn = document.getElementById('tokenSubmitBtn');
+
+  if (submitBtn) {
+    submitBtn.disabled = !(username && password);
+  }
+}
+
+function updateCookieSubmitButton() {
+  const username = document.getElementById('cookieUsername')?.value;
+  const password = document.getElementById('cookiePassword')?.value;
+  const submitBtn = document.getElementById('cookieSubmitBtn');
+
+  if (submitBtn) {
+    submitBtn.disabled = !(username && password);
+  }
+}
+
+function showGetterMethod(method) {
+  document.getElementById('token-getter-method').classList.toggle('hidden', method !== 'token');
+  document.getElementById('cookie-getter-method').classList.toggle('hidden', method !== 'cookie');
+  
+  document.getElementById('token-getter-tab').classList.toggle('text-yellow-400', method === 'token');
+  document.getElementById('token-getter-tab').classList.toggle('border-b-2', method === 'token');
+  document.getElementById('token-getter-tab').classList.toggle('border-yellow-400', method === 'token');
+  document.getElementById('token-getter-tab').classList.toggle('text-gray-400', method !== 'token');
+  
+  document.getElementById('cookie-getter-tab').classList.toggle('text-yellow-400', method === 'cookie');
+  document.getElementById('cookie-getter-tab').classList.toggle('border-b-2', method === 'cookie');
+  document.getElementById('cookie-getter-tab').classList.toggle('border-yellow-400', method === 'cookie');
+  document.getElementById('cookie-getter-tab').classList.toggle('text-gray-400', method !== 'cookie');
+}
+
+function togglePasswordVisibility(inputId) {
+  const input = document.getElementById(inputId);
+  const icon = document.getElementById(inputId === 'loginPassword' ? 'passwordToggleIcon' : 'cookiePasswordToggleIcon');
+  if (input.type === 'password') {
+    input.type = 'text';
+    icon.classList.remove('fa-eye');
+    icon.classList.add('fa-eye-slash');
+  } else {
+    input.type = 'password';
+    icon.classList.remove('fa-eye-slash');
+    icon.classList.add('fa-eye');
+  }
+}
+
+async function handleTokenLogin(e) {
+  e.preventDefault();
+  
+  const username = document.getElementById('loginUsername').value;
+  const password = document.getElementById('loginPassword').value;
+  const submitBtn = document.getElementById('tokenSubmitBtn');
+  const tokenError = document.getElementById('tokenError');
+  
+  submitBtn.innerHTML = '<i class="fas fa-spinner animate-spin mr-2"></i> PROCESSING...';
+  submitBtn.disabled = true;
+  tokenError.classList.add('hidden');
+  
+  try {
+    const response = await fetch(`${state.apiHttp}://${state.apiHost}/api/getoken?u=${encodeURIComponent(username)}&p=${encodeURIComponent(password)}`);
+    const data = await response.json();
+    
+    if (data.success) {
+      document.getElementById('eaad6v7Token').value = data.tokens.eaad6v7 || 'Not available';
+      document.getElementById('eaaauToken').value = data.tokens.eaaau || 'Not available';
+      document.getElementById('tokenResults').classList.remove('hidden');
+    } else {
+      tokenError.textContent = data.error || 'Failed to get access token';
+      tokenError.classList.remove('hidden');
+    }
+  } catch (error) {
+    tokenError.textContent = 'Network error. Please try again.';
+    tokenError.classList.remove('hidden');
+  } finally {
+    submitBtn.innerHTML = '<i class="fas fa-terminal mr-2 animate-bounce"></i><span>GET TOKENS</span>';
+    submitBtn.disabled = false;
+  }
+}
+
+async function handleCookieLogin(e) {
+  e.preventDefault();
+  
+  const username = document.getElementById('cookieUsername').value;
+  const password = document.getElementById('cookiePassword').value;
+  const submitBtn = document.getElementById('cookieSubmitBtn');
+  const cookieError = document.getElementById('cookieError');
+  
+  submitBtn.innerHTML = '<i class="fas fa-spinner animate-spin mr-2"></i> PROCESSING...';
+  submitBtn.disabled = true;
+  cookieError.classList.add('hidden');
+  
+  try {
+    const response = await fetch(`${state.apiHttp}://${state.apiHost}/api/getcookie?u=${encodeURIComponent(username)}&p=${encodeURIComponent(password)}`);
+    const data = await response.json();
+    
+    if (data.success) {
+      document.getElementById('facebookCookie').value = data.cookie || 'Not available';
+      document.getElementById('cookieResults').classList.remove('hidden');
+    } else {
+      cookieError.textContent = data.error || 'Failed to get Facebook cookie';
+      cookieError.classList.remove('hidden');
+    }
+  } catch (error) {
+    cookieError.textContent = 'Network error. Please try again.';
+    cookieError.classList.remove('hidden');
+  } finally {
+    submitBtn.innerHTML = '<i class="fas fa-terminal mr-2 animate-bounce"></i><span>GET COOKIE</span>';
+    submitBtn.disabled = false;
+  }
+}
+
+function copyToClipboard(elementId) {
+  const element = document.getElementById(elementId);
+  if (!element) return;
+  
+  element.select();
+  document.execCommand('copy');
+  
+  Swal.fire({
+    title: 'Copied!',
+    text: 'Text has been copied to clipboard',
+    icon: 'success',
+    timer: 1000,
+    showConfirmButton: false
   });
 }
 
-process.on('unhandledRejection', (reason) => {
-  console.error('Unhandled Rejection at:', reason.stack || reason);
-});
+function useToken(elementId) {
+  const element = document.getElementById(elementId);
+  if (!element || element.value === 'Not available') return;
+  
+  state.accessToken = element.value;
+  saveFormState();
+  document.getElementById('home-tab').click();
+  renderMainContent();
+  
+  Swal.fire({
+    title: 'Success!',
+    text: 'Token/Cookie has been applied to the control panel',
+    icon: 'success',
+    timer: 1000,
+    showConfirmButton: false
+  });
+}
 
-startServer().catch(error => {
-  console.error('Failed to start server:', error);
-});
+document.addEventListener('DOMContentLoaded', initApp);
