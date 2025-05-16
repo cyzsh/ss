@@ -217,20 +217,16 @@ async function checkExistingProcess() {
         saveFormState();
       }
       
-      // Fetch historical logs if available
-      if (data.logs && data.logs.length > 0) {
-        state.logs = data.logs.map(log => ({
-          message: log.message,
-          isError: log.isError,
-          id: Date.now() + Math.random(),
-          isNew: false
+      // If WebSocket is connected, request fresh sync
+      if (state.ws && state.ws.readyState === WebSocket.OPEN) {
+        state.ws.send(JSON.stringify({
+          type: "client-sync",
+          processId: state.currentProcessId,
+          clientId: state.clientId
         }));
       }
       
       renderMainContent();
-      if (state.logs.length > 0) {
-        renderTerminal();
-      }
     }
   } catch (error) {
     console.error('Error checking for existing process:', error);
@@ -244,14 +240,15 @@ function initWebSocket() {
 
   state.ws.onopen = () => {
     state.reconnectAttempts = 0;
+    addLog('SYSTEM CONNECTED', false);
+    
+    // Request sync for any active process
     if (state.currentProcessId) {
-      // Request latest state when reconnecting
       state.ws.send(JSON.stringify({
         type: "client-sync",
         processId: state.currentProcessId,
         clientId: state.clientId
       }));
-      addLog('SYSTEM RECONNECTED. SYNCING...', false);
     }
   };
 
@@ -259,11 +256,24 @@ function initWebSocket() {
     try {
       const data = JSON.parse(event.data);
       
-      if (data.type === "log-history") {
-        // Add historical logs when reconnecting
-        data.logs.forEach(log => {
-          addLog(log.message, log.isError);
-        });
+      if (data.type === "process-sync") {
+        // Handle initial sync data
+        if (data.logs && data.logs.length > 0) {
+          // Only add logs we don't already have
+          const newLogs = data.logs.filter(log => 
+            !state.logs.some(existing => existing.message === log.message)
+          );
+          newLogs.forEach(log => {
+            addLog(log.message, log.isError);
+          });
+        }
+        
+        // Update process state
+        if (data.processId === state.currentProcessId) {
+          state.isPaused = data.isPaused || false;
+          state.loading = !data.isPaused;
+          renderMainContent();
+        }
         return;
       }
       
