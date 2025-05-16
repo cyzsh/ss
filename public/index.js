@@ -47,11 +47,6 @@
 	});
 	}
 	
-	// Check if in iframe
-	if (window.top !== window.self) {
-	window.top.location.href = window.self.location.href;
-	}
-	
 	// App state
 	const state = {
 	accessToken: getCookie('fss_accessToken') || "",
