@@ -1,5 +1,5 @@
 {
-  "name": "fbautoshare",
+  "name": "spamshare",
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
@@ -8,7 +8,7 @@
   },
   "keywords": [],
   "author": "Cyzsh",
-  "license": "ISC",
+  "license": "MIT",
   "description": "",
   "dependencies": {
     "axios": "^1.8.4",
