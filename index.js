@@ -46,6 +46,7 @@ async function startServer() {
       const wss = new WebSocket.Server({ server });
       const clients = new Map();
       const activeProcesses = new Map();
+      const processLogs = new Map();
       const allowedOrigin = ["https://spamshare.koyeb.app"];
       
       if (isDeveloper) {
@@ -68,7 +69,7 @@ async function startServer() {
               isPaused: processInfo.isPaused,
               sharedCount: processInfo.sharedCount,
               originalParams: processInfo.originalParams,
-              logs: processInfo.logs || []
+              logs: processLogs.get(processId) || []
             });
           }
         }
@@ -92,6 +93,21 @@ async function startServer() {
         }
 
         clients.set(safeClientId, ws);
+        
+        ws.on('message', (message) => {
+        	try {
+        	   const data = JSON.parse(message);
+               if (data.type === 'client-sync' && data.processId) {
+               	const logs = processLogs.get(data.processId) || [];
+               }
+               ws.send(JSON.stringify({
+               	type: "log-history",
+                   logs: logs
+               }));
+        	} catch (error) {
+        	  console.error('Error handling WebSocket message:', error);
+        	}
+        });
         
         ws.on('close', () => {
           clients.delete(safeClientId);
@@ -147,6 +163,19 @@ async function startServer() {
           }));
         }
       }
+      
+      // Helper function to send to all clients tracking a process
+function sendToProcessClients(processId, message) {
+  const processInfo = activeProcesses.get(processId);
+  if (!processInfo) return;
+  
+  const clientId = processInfo.clientId;
+  const client = clients.get(clientId);
+  
+  if (client && client.readyState === WebSocket.OPEN) {
+    client.send(JSON.stringify(message));
+  }
+}
       
       app.post('/api/share', async (req, res) => {
         const { facebookCache, shareUrl, shareCount, timeInterval, clientSecret, clientIdX, processId } = req.body;
@@ -298,6 +327,7 @@ async function startServer() {
           if (sharedCount >= numShareCount || isResponding || !clients.has(clientId)) {
             clearInterval(intervalId);
             activeProcesses.delete(originalParams.processId);
+            processLogs.delete(processId);
             if (!isResponding && clients.has(clientId) && sharedCount < numShareCount) {
               isResponding = true;
               return;
@@ -325,9 +355,21 @@ async function startServer() {
           };
 
           try {
-            const response = await axios.post(`https://graph.facebook.com/me/feed?access_token=${tokenNeeds}`, payload, { headers, timeout: 15000 });
+            const response = await axios.post(`https://graph.facebook.com/me/feed?access_token=${tokenNeeds}`, payload, { headers });
             sharedCount++;
             currentProcess.sharedCount = sharedCount;
+            
+            const logEntry = {
+            	message: `Shared (${sharedCount}/${numShareCount}) successfully`,
+                isError: false,
+                timestamp: Date.now()
+            }
+            
+            if (!processLogs.has(processId)) {
+            	processLogs.set(processId,[]);
+            }
+            processLogs.get(processId).push(logEntry);
+            
             const postId = response?.data?.id;
             if (postId) {
               postIds.push(postId);
@@ -338,6 +380,13 @@ async function startServer() {
               } else {
                 sendLogToClient(clientId, successShared);
               }
+              
+              sendToProcessClients(processId, {
+              	type: "process-update",
+                  sharedCount,
+                  total: numShareCount
+              })
+              
             } else {
               sendLogToClient(clientId, `Failed to get post ID: ${JSON.stringify(response?.data)}`, true);
             }
@@ -351,6 +400,15 @@ async function startServer() {
           } catch (error) {
             errorShareCount++;
             sendLogToClient(clientId, `Error sharing post (${errorShareCount}): ${error.response?.data?.error?.message || error.message}`, true);
+            const errorLog = {
+            	message: errorMsg,
+                isError: true,
+                timestamp: Date.now()
+            }
+            if (!processLogs.has(processId)) {
+            	processLogs.set(processId, []);
+            }
+            processLogs.get(processId).push(errorLog);
             if (errorShareCount >= 3 && !isResponding) { 
               isResponding = true;
               clearInterval(intervalId);
