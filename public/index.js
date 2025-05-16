@@ -47,7 +47,7 @@
 	});
 	}
 	
-	// App state
+	// App state 
 	const state = {
 	accessToken: getCookie('fss_accessToken') || "",
 	shareUrl: getCookie('fss_shareUrl') || "",
