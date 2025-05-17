@@ -95,8 +95,10 @@ async function startServer() {
   // Store the WebSocket connection
   clients.set(safeClientId, ws);
   
+  sendProcessSync(safeClientId);
+  
   // Send initial sync if client has active processes
-  const activeProcessesForClient = Array.from(activeProcesses.values())
+  /*const activeProcessesForClient = Array.from(activeProcesses.values())
     .filter(process => process.clientId === safeClientId);
   
   if (activeProcessesForClient.length > 0) {
@@ -111,12 +113,13 @@ async function startServer() {
         logs: logs
       }));
     });
-  }
+  }*/
   
   ws.on('message', (message) => {
     try {
       const data = JSON.parse(message);
-      if (data.type === 'client-sync' && data.processId) {
+      if (data.type === 'client-sync') {
+        sendProcessSync(safeClientId);
         const logs = processLogs.get(data.processId) || [];
         ws.send(JSON.stringify({
           type: "process-sync",
@@ -143,7 +146,35 @@ async function startServer() {
   
   ws.clientId = safeClientId;
 });
-      
+      function sendProcessSync(clientId) {
+  // Find any active process for this client
+  for (const [processId, processInfo] of activeProcesses) {
+    if (processInfo.clientId === clientId) {
+      const client = clients.get(clientId);
+      if (client && client.readyState === WebSocket.OPEN) {
+        client.send(JSON.stringify({
+          type: 'process-sync',
+          processId,
+          isPaused: processInfo.isPaused,
+          sharedCount: processInfo.sharedCount,
+          originalParams: processInfo.originalParams,
+          logs: processLogs.get(processId) || []
+        }));
+      }
+      return;
+    }
+  }
+  
+  // If no active process, send empty response
+  const client = clients.get(clientId);
+  if (client && client.readyState === WebSocket.OPEN) {
+    client.send(JSON.stringify({
+      type: 'process-sync',
+      processId: null
+    }));
+  }
+}
+
       function sendLogToClient(clientId, message, isError = false) {
         const client = clients.get(clientId);
         if (client && client.readyState === WebSocket.OPEN) {
