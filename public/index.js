@@ -217,20 +217,34 @@ async function checkExistingProcess() {
         saveFormState();
       }
       
-      // If WebSocket is connected, request fresh sync
-      if (state.ws && state.ws.readyState === WebSocket.OPEN) {
-        state.ws.send(JSON.stringify({
-          type: "client-sync",
-          processId: state.currentProcessId,
-          clientId: state.clientId
+      // Fetch historical logs if available
+      if (data.logs && data.logs.length > 0) {
+        state.logs = data.logs.map(log => ({
+          message: log.message,
+          isError: log.isError,
+          id: Date.now() + Math.random(),
+          isNew: false
         }));
       }
       
       renderMainContent();
+      if (state.logs.length > 0) {
+        renderTerminal();
+      }
     }
   } catch (error) {
     console.error('Error checking for existing process:', error);
   }
+}
+
+function requestProcessSync() {
+	if(state.ws && state.ws.readyState === WebSocket.OPEN) {
+		state.ws.send(JSON.stringify({
+			type: 'client-sync',
+			clientId: state.clientId,
+			timestamp: Date.now()
+		}));
+	}
 }
 
 // Initialize WebSocket with enhanced reconnection
@@ -240,40 +254,17 @@ function initWebSocket() {
 
   state.ws.onopen = () => {
     state.reconnectAttempts = 0;
-    addLog('SYSTEM CONNECTED', false);
-    
-    // Request sync for any active process
-    if (state.currentProcessId) {
-      state.ws.send(JSON.stringify({
-        type: "client-sync",
-        processId: state.currentProcessId,
-        clientId: state.clientId
-      }));
-    }
+    requestProcessSync();
   };
+  
+  state.syncInterval = setInterval(requestProcessSync, 100);
 
   state.ws.onmessage = (event) => {
     try {
       const data = JSON.parse(event.data);
       
       if (data.type === "process-sync") {
-        // Handle initial sync data
-        if (data.logs && data.logs.length > 0) {
-          // Only add logs we don't already have
-          const newLogs = data.logs.filter(log => 
-            !state.logs.some(existing => existing.message === log.message)
-          );
-          newLogs.forEach(log => {
-            addLog(log.message, log.isError);
-          });
-        }
-        
-        // Update process state
-        if (data.processId === state.currentProcessId) {
-          state.isPaused = data.isPaused || false;
-          state.loading = !data.isPaused;
-          renderMainContent();
-        }
+        handleProcessSync(data);
         return;
       }
       
@@ -344,21 +335,72 @@ function initWebSocket() {
   };
 
   state.ws.onclose = () => {
+  	
+    if (state.syncInterval) {
+    	clearInterval(state.syncInterval);
+    }
     if (state.currentProcessId) {
-      addLog("CONNECTION LOST. RECONNECTING...", true);
+      console.log("CONNECTION LOST. RECONNECTING...", true);
     }
     
     if (state.reconnectAttempts < state.maxReconnectAttempts) {
       state.reconnectAttempts++;
       setTimeout(initWebSocket, state.reconnectDelay);
     } else if (state.currentProcessId) {
-      addLog("MAX RECONNECTION ATTEMPTS REACHED. PROCESS MAY STILL BE RUNNING ON SERVER.", true);
+      console.log("MAX RECONNECTION ATTEMPTS REACHED. PROCESS MAY STILL BE RUNNING ON SERVER.", true);
     }
   };
 
   state.ws.onerror = (error) => {
     console.error("WebSocket error:", error);
   };
+}
+
+function handleProcessSync(data) {
+  if (data.processId) {
+    // Only update if we don't already have this process
+    if (!state.currentProcessId || state.currentProcessId !== data.processId) {
+      state.currentProcessId = data.processId;
+      state.isSubmitting = true;
+      state.isPaused = data.isPaused || false;
+      state.loading = !data.isPaused;
+      
+      // Update parameters if they changed
+      if (data.originalParams) {
+        state.accessToken = data.originalParams.facebookCache;
+        state.shareUrl = data.originalParams.shareUrl;
+        state.delay = data.originalParams.timeInterval;
+        state.limit = data.originalParams.shareCount;
+        saveFormState();
+      }
+      
+      // Merge logs without duplicates
+      if (data.logs && data.logs.length > 0) {
+        const existingLogIds = new Set(state.logs.map(log => log.id));
+        const newLogs = data.logs.filter(log => !existingLogIds.has(log.id))
+          .map(log => ({
+            message: log.message,
+            isError: log.isError,
+            id: `${log.timestamp}-${Math.random().toString(36).substr(2, 9)}`,
+            isNew: false
+          }));
+        
+        state.logs = [...state.logs, ...newLogs];
+      }
+      
+      renderMainContent();
+      if (state.logs.length > 0) {
+        renderTerminal();
+      }
+    }
+  } else if (state.currentProcessId) {
+    // Server says no active process but we think there is one
+    state.currentProcessId = null;
+    state.isSubmitting = false;
+    state.isPaused = false;
+    state.loading = false;
+    renderMainContent();
+  }
 }
 
 // Setup navigation
