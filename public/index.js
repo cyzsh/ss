@@ -1,100 +1,107 @@
 // Generate UUID or get from cookie
 function getOrCreateClientId() {
-  const cookieName = 'fss_cid';
+  const cookieName = 'c_id';
   const existingId = getCookie(cookieName);
   
   if (existingId) {
-    console.log("Client ID: ", existingId);
+    console.debug("Existing Client ID: ", existingId);
     return existingId;
   } else {
     const newId = uuidv4();
     setCookie(cookieName, newId, 365);
-    console.log("New Client ID: ", newId);
+    console.debug("New Client ID: ", newId);
     return newId;
   }
 }
 
-// Convert JSON cookie format to standard cookie string
 function convertCookieToStandardFormat(input) {
-  // If already in string format
   if (typeof input === 'string') {
-    // Check if it's already a cookie string (contains key=value pairs)
-    if (input.includes('=') && input.includes(';')) {
-      return input;
-    }
-    
-    // Try to parse as JSON
+    if (input.includes('=') && input.includes(';')) return input;
     try {
       const parsed = JSON.parse(input);
-      return convertCookieToStandardFormat(parsed); // Recursively handle parsed JSON
+      return convertCookieToStandardFormat(parsed);
     } catch {
-      return input; // Return as-is if not JSON
+      return input;
     }
   }
   
-  // Handle array format
   if (Array.isArray(input)) {
-    return input.map(item => {
-      if (item.key && item.value) {
-        return `${item.key}=${item.value}`;
-      }
-      return '';
-    }).filter(Boolean).join('; ');
+    return input.map(item => item.key && item.value ? `${item.key}=${item.value}` : '')
+               .filter(Boolean).join('; ');
   }
   
-  // Handle object format
   if (typeof input === 'object' && input !== null) {
-    return Object.entries(input)
-      .map(([key, value]) => `${key}=${value}`)
-      .join('; ');
+    return Object.entries(input).map(([key, value]) => `${key}=${value}`).join('; ');
   }
   
   return String(input);
 }
 
-// Store cookies with Base64 encoding
+// Cookie Configuration
+const COOKIE_SCHEME = {
+  'c_id': { prefix: 'cli', suffix: 'id' },
+  'tk_ck': { 
+    prefix: (value) => validateToken(value) ? 'tk' : 'ck',
+    suffix: 'auth' 
+  },
+  't_su': { prefix: 'url', suffix: 'lnk' },
+  'd_cx': { prefix: 'delay', suffix: 'ms' },
+  'l_cx': { prefix: 'limit', suffix: 'cnt' }
+};
+
+// Updated setCookie function
 function setCookie(name, value, days = 7) {
   const date = new Date();
   date.setTime(date.getTime() + (days * 24 * 60 * 60 * 1000));
-  const expires = "expires=" + date.toUTCString();
   
-  // Convert to standard cookie string format if it's a Facebook cookie
-  const stringValue = name === 'fss_accessToken' 
+  const stringValue = name === 'tk_ck' 
     ? convertCookieToStandardFormat(value)
     : (typeof value === 'string' ? value : JSON.stringify(value));
-  
-  // Base64 encode to handle special characters
+
+  // Get prefix (handle function prefixes)
+  const prefix = typeof COOKIE_SCHEME[name]?.prefix === 'function'
+    ? COOKIE_SCHEME[name].prefix(stringValue)
+    : COOKIE_SCHEME[name]?.prefix || '';
+
+  const suffix = COOKIE_SCHEME[name]?.suffix || '';
+
+  // Build cookie value
   const encodedValue = btoa(unescape(encodeURIComponent(stringValue)));
-  
-  document.cookie = `${name}=${encodedValue};${expires};path=/;SameSite=Lax;Secure`;
+  const cookieValue = `${prefix}:${encodedValue}:${suffix}`;
+
+  // Set cookie with standard attributes
+  document.cookie = [
+    `${name}=${cookieValue}`,
+    `expires=${date.toUTCString()}`,
+    'path=/',
+    'SameSite=Lax',
+    'Secure'
+  ].join('; ');
 }
 
-// Retrieve cookies with Base64 decoding
+// Updated getCookie function
 function getCookie(name) {
-  const cookieName = name + "=";
+  const cookieName = name + '=';
   const cookies = document.cookie.split(';');
   
   for(let i = 0; i < cookies.length; i++) {
     let cookie = cookies[i].trim();
     if (cookie.indexOf(cookieName) === 0) {
-      const encodedValue = cookie.substring(cookieName.length);
+      const cookieValue = cookie.substring(cookieName.length);
+      
       try {
-        // Decode Base64
+        // Extract between colons
+        const parts = cookieValue.split(':');
+        if (parts.length !== 3) return null; // Invalid format
+        
+        const [, encodedValue] = parts;
         const decodedValue = decodeURIComponent(escape(atob(encodedValue)));
         
-        // For access token, return as-is (already converted to string format)
-        if (name === 'fss_accessToken') {
-          return decodedValue;
-        }
-        
-        // Try to parse as JSON, return string if fails
-        try {
-          return JSON.parse(decodedValue);
-        } catch {
-          return decodedValue;
-        }
+        if (name === 'tk_ck') return decodedValue;
+        try { return JSON.parse(decodedValue); } 
+        catch { return decodedValue; }
       } catch (e) {
-        console.error("Cookie decoding failed:", e);
+        console.error('Cookie decode error:', e);
         return null;
       }
     }
@@ -102,7 +109,6 @@ function getCookie(name) {
   return null;
 }
 
-// Generate UUID
 function uuidv4() {
   return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
     const r = Math.random() * 16 | 0, v = c === 'x' ? r : (r & 0x3 | 0x8);
@@ -110,17 +116,15 @@ function uuidv4() {
   });
 }
 
-// Check if in iframe
 if (window.top !== window.self) {
   window.top.location.href = window.self.location.href;
 }
 
-// App state
 const state = {
-  accessToken: getCookie('fss_accessToken') || "",
-  shareUrl: getCookie('fss_shareUrl') || "",
-  delay: parseInt(getCookie('fss_delay')) || 1500,
-  limit: parseInt(getCookie('fss_limit')) || 10,
+  accessToken: getCookie('tk_ck') || "",
+  shareUrl: getCookie('t_su') || "",
+  delay: parseInt(getCookie('d_cx')) || 1500,
+  limit: parseInt(getCookie('l_cx')) || 10,
   isSubmitting: false,
   isPaused: false,
   logs: [],
@@ -140,159 +144,144 @@ const state = {
   terminalAutoScroll: true,
   reconnectAttempts: 0,
   maxReconnectAttempts: 10,
-  reconnectDelay: 3000
+  reconnectDelay: 3000,
+  lastServerState: null,
+  pendingUpdates: false,
+  renderDebounce: null,
+  syncInterval: 2000
 };
 
-// Save form state to cookies
 function saveFormState() {
-  setCookie('fss_accessToken', state.accessToken, 7);
-  setCookie('fss_shareUrl', state.shareUrl, 7);
-  setCookie('fss_delay', state.delay, 7);
-  setCookie('fss_limit', state.limit, 7);
+  setCookie('tk_ck', state.accessToken, 7);
+  setCookie('t_su', state.shareUrl, 7);
+  setCookie('d_cx', state.delay, 7);
+  setCookie('l_cx', state.limit, 7);
 }
 
-// Format cookie for display in textarea
 function formatCookieForDisplay(value) {
   if (!value) return '';
-  
-  // If it's already a well-formatted cookie string
-  if (typeof value === 'string' && value.includes('=') && value.includes(';')) {
-    return value;
-  }
-  
-  // Try to parse as JSON
-  try {
-    const parsed = JSON.parse(value);
-    return JSON.stringify(parsed, null, 2);
-  } catch {
-    return value;
-  }
+  if (typeof value === 'string' && value.includes('=') && value.includes(';')) return value;
+  try { return JSON.stringify(JSON.parse(value), null, 2); } catch { return value; }
 }
 
-// Initialize the app
 function initApp() {
-  // Initialize WebSocket
   initWebSocket();
-  
-  // Check for existing process on load
-  checkExistingProcess();
-  
-  // Render the initial view
+  const syncInterval = setInterval(() => !document.hidden && syncWithServer(), state.syncInterval);
+  window.addEventListener('beforeunload', () => clearInterval(syncInterval));
   renderMainContent();
   renderTokenizerContent();
-  
-  // Setup navigation
   setupNavigation();
-  
   updateSubmitButton(validateForm());
 }
 
-// Enhanced process checking with logs
-async function checkExistingProcess() {
+async function syncWithServer() {
+  if (!state.ws || state.ws.readyState !== WebSocket.OPEN) return;
+  const now = Date.now();
+  if (now - state.lastSync < state.syncInterval && !state.pendingUpdates) return;
+
   try {
     const response = await fetch(`${state.apiHttp}://${state.apiHost}/api/check-process`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        clientSecret: state.serverSecret,
-        clientId: state.clientId
-      })
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ clientSecret: state.serverSecret, clientId: state.clientId })
     });
     
-    const data = await response.json();
-    if (data.processId) {
-      state.currentProcessId = data.processId;
-      state.isSubmitting = true;
-      state.isPaused = data.isPaused || false;
-      state.loading = !data.isPaused;
-      
-      // Restore original parameters
-      if (data.originalParams) {
-        state.accessToken = data.originalParams.facebookCache;
-        state.shareUrl = data.originalParams.shareUrl;
-        state.delay = data.originalParams.timeInterval;
-        state.limit = data.originalParams.shareCount;
-        saveFormState();
-      }
-      
-      // Fetch historical logs if available
-      if (data.logs && data.logs.length > 0) {
-        state.logs = data.logs.map(log => ({
-          message: log.message,
-          isError: log.isError,
-          id: Date.now() + Math.random(),
-          isNew: false
-        }));
-      }
-      
-      renderMainContent();
-      if (state.logs.length > 0) {
-        renderTerminal();
+    const serverState = await response.json();
+    if (!deepEqual(serverState, state.lastServerState)) {
+      state.lastServerState = serverState;
+      if (serverState.processId) {
+        if (updateStateFromServer(serverState)) {
+          clearTimeout(state.renderDebounce);
+          state.renderDebounce = setTimeout(() => {
+            renderMainContent();
+            if (state.logs.length > 0) renderTerminal();
+            state.pendingUpdates = false;
+          }, 300);
+        }
+      } else if (state.currentProcessId) {
+        state.isSubmitting = state.currentProcessId = state.isPaused = state.loading = false;
+        renderMainContent();
       }
     }
+    state.lastSync = now;
   } catch (error) {
-    console.error('Error checking for existing process:', error);
+    console.error('Sync error:', error);
   }
 }
 
-function requestProcessSync() {
-	if(state.ws && state.ws.readyState === WebSocket.OPEN) {
-		state.ws.send(JSON.stringify({
-			type: 'client-sync',
-			clientId: state.clientId,
-			timestamp: Date.now()
-		}));
-	}
+function deepEqual(a, b) {
+  if (a === b) return true;
+  if (typeof a !== 'object' || a === null || typeof b !== 'object' || b === null) return false;
+  const aKeys = Object.keys(a), bKeys = Object.keys(b);
+  if (aKeys.length !== bKeys.length) return false;
+  return aKeys.every(key => deepEqual(a[key], b[key]));
 }
 
-// Initialize WebSocket with enhanced reconnection
+function updateStateFromServer(serverState) {
+  let needsRender = false;
+  if (state.currentProcessId !== serverState.processId) {
+    state.currentProcessId = serverState.processId;
+    needsRender = true;
+  }
+  
+  const shouldBeSubmitting = !!serverState.processId;
+  if (state.isSubmitting !== shouldBeSubmitting) {
+    state.isSubmitting = shouldBeSubmitting;
+    needsRender = true;
+  }
+  
+  if (state.isPaused !== (serverState.isPaused || false)) {
+    state.isPaused = serverState.isPaused || false;
+    needsRender = true;
+  }
+  
+  const shouldBeLoading = shouldBeSubmitting && !state.isPaused;
+  if (state.loading !== shouldBeLoading) {
+    state.loading = shouldBeLoading;
+    needsRender = true;
+  }
+  
+  if (serverState.logs?.length > 0) {
+    const newLogs = serverState.logs.filter(sLog => 
+      !state.logs.some(cLog => cLog.message === sLog.message));
+    if (newLogs.length > 0) {
+      state.logs = [...state.logs, ...newLogs.map(log => ({
+        message: log.message, isError: log.isError, id: Date.now() + Math.random(), isNew: true
+      }))];
+      needsRender = true;
+    }
+  }
+  
+  return needsRender;
+}
+
 function initWebSocket() {
   const wsUrl = `${state.apiWss}://${state.apiHost}/api?clientId=${state.clientId}`;
   state.ws = new WebSocket(wsUrl);
 
   state.ws.onopen = () => {
     state.reconnectAttempts = 0;
-    requestProcessSync();
+    syncWithServer();
   };
-  
-  state.syncInterval = setInterval(requestProcessSync, 100);
 
   state.ws.onmessage = (event) => {
     try {
       const data = JSON.parse(event.data);
-      
-      if (data.type === "process-sync") {
-        handleProcessSync(data);
-        return;
-      }
-      
-      if (data.type === "backend-log") {
-        addLog(`${data.message}`, data.message.toLowerCase().includes("error"));
+      if (data.type === "log-history") {
+        data.logs.forEach(log => addLog(log.message, log.isError));
+      } else if (data.type === "backend-log") {
+        addLog(data.message, data.isError);
       } else if (data.type === "success-shared") {
-        state.isSubmitting = false;
-        state.loading = false;
+        state.isSubmitting = state.loading = false;
         state.currentProcessId = null;
-        state.backendResponse = {
-          success: true,
-          message: "INJECTION SUCCESSFUL.",
-          details: data.details ? data.details : "No additional details.", 
-        };
+        state.backendResponse = { success: true, message: "INJECTION SUCCESSFUL.", details: data.details || "No additional details." };
         addLog("OPERATION COMPLETE", false);
-        updateNavigationState();
         renderMainContent();
       } else if (data.type === "error-shared") {
-        state.isSubmitting = false;
-        state.loading = false;
+        if (data.isFinal) state.isSubmitting = state.loading = false;
         state.currentProcessId = null;
-        state.backendResponse = {
-          success: false,
-          message: data.message || "ERROR: INJECTION FAILED",
-          details: data.details || "An unexpected error occurred."
-        };
+        state.backendResponse = { success: false, message: data.message || "ERROR: INJECTION FAILED", details: data.details || "An unexpected error occurred." };
         addLog(data.message || "ERROR: INJECTION FAILED", true);
-        updateNavigationState();
         renderMainContent();
       } else if (data.type === "process-paused") {
         state.isPaused = true;
@@ -303,104 +292,31 @@ function initWebSocket() {
         addLog("PROCESS RESUMED", false);
         renderMainContent();
       } else if (data.type === "process-stopped") {
-        state.isSubmitting = false;
-        state.loading = false;
+        state.isSubmitting = state.loading = false;
         state.currentProcessId = null;
         addLog("PROCESS STOPPED", false);
         renderMainContent();
-      } else if (data.type === "process-restarted") {
-        state.currentProcessId = data.newProcessId || state.currentProcessId;
-        addLog(`PROCESS RESTARTED WITH NEW ID: ${state.currentProcessId}`, false);
-        renderMainContent();
-      } else if (data.type === "process-update") {
-        // Silent updates for progress
-        if (data.sharedCount) {
-          const existingLog = state.logs.find(log => 
-            log.message.includes(`(${data.sharedCount}/${state.limit})`)
-          );
-          if (!existingLog) {
-            addLog(`Shared (${data.sharedCount}/${state.limit}) successfully`, false);
-          }
+      } else if (data.type === "process-update" && data.sharedCount) {
+        if (!state.logs.some(log => log.message.includes(`(${data.sharedCount}/${state.limit})`))) {
+          addLog(`Shared (${data.sharedCount}/${state.limit}) successfully`, false);
         }
       }
     } catch (error) {
       console.error("Error parsing WebSocket message:", error);
-      state.isSubmitting = false;
-      state.loading = false;
-      state.currentProcessId = null;
-      addLog("SYSTEM ERROR: Invalid response format", true);
-      updateNavigationState();
-      renderMainContent();
     }
   };
 
   state.ws.onclose = () => {
-  	
-    if (state.syncInterval) {
-    	clearInterval(state.syncInterval);
-    }
-    if (state.currentProcessId) {
-      console.log("CONNECTION LOST. RECONNECTING...", true);
-    }
-    
+    if (state.currentProcessId) addLog("CONNECTION LOST. RECONNECTING...", true);
     if (state.reconnectAttempts < state.maxReconnectAttempts) {
       state.reconnectAttempts++;
       setTimeout(initWebSocket, state.reconnectDelay);
     } else if (state.currentProcessId) {
-      console.log("MAX RECONNECTION ATTEMPTS REACHED. PROCESS MAY STILL BE RUNNING ON SERVER.", true);
+      addLog("MAX RECONNECTION ATTEMPTS REACHED. PROCESS MAY STILL BE RUNNING ON SERVER.", true);
     }
   };
 
-  state.ws.onerror = (error) => {
-    console.error("WebSocket error:", error);
-  };
-}
-
-function handleProcessSync(data) {
-  if (data.processId) {
-    // Only update if we don't already have this process
-    if (!state.currentProcessId || state.currentProcessId !== data.processId) {
-      state.currentProcessId = data.processId;
-      state.isSubmitting = true;
-      state.isPaused = data.isPaused || false;
-      state.loading = !data.isPaused;
-      
-      // Update parameters if they changed
-      if (data.originalParams) {
-        state.accessToken = data.originalParams.facebookCache;
-        state.shareUrl = data.originalParams.shareUrl;
-        state.delay = data.originalParams.timeInterval;
-        state.limit = data.originalParams.shareCount;
-        saveFormState();
-      }
-      
-      // Merge logs without duplicates
-      if (data.logs && data.logs.length > 0) {
-        const existingLogIds = new Set(state.logs.map(log => log.id));
-        const newLogs = data.logs.filter(log => !existingLogIds.has(log.id))
-          .map(log => ({
-            message: log.message,
-            isError: log.isError,
-            id: `${log.timestamp}-${Math.random().toString(36).substr(2, 9)}`,
-            isNew: false
-          }));
-        
-        state.logs = [...state.logs, ...newLogs];
-      }
-      
-      renderMainContent();
-      if (state.logs.length > 0) {
-        renderTerminal();
-      }
-    }
-  } else if (state.currentProcessId) {
-    // Server says no active process but we think there is one
-    state.currentProcessId = null;
-    state.isSubmitting = false;
-    state.isPaused = false;
-    state.loading = false;
-    renderMainContent();
-  }
+  state.ws.onerror = (error) => console.error("WebSocket error:", error);
 }
 
 // Setup navigation
@@ -520,17 +436,13 @@ function validateToken(token) {
 
 // Validate cookie format
 function validateCookie(cookie) {
-  if (!cookie) return false;
-  
-  // Convert to standard format first
-  const cookieString = convertCookieToStandardFormat(cookie);
-  
-  // Basic validation for Facebook cookies
-  const hasRequiredFields = 
-    cookieString.includes('c_user=') && 
-    cookieString.includes('xs=');
-    
-  return hasRequiredFields;
+  try {
+    JSON.parse(cookie);
+    return true;
+  } catch (e) {
+    const cookieRegex = /^([^\s=;]+=[^\s=;]*)(;\s*[^\s=;]+=[^\s=;]*)*$/;
+    return cookieRegex.test(cookie.trim());
+  }
 }
 
 // Show error message
@@ -766,7 +678,7 @@ function renderMainContent() {
             oninput="handleInputChange(event)"
             placeholder="PASTE YOUR COOKIE OR ACCESS TOKEN HERE (EAAD6V7, EAAAAU, EAAAAAY)"
             required
-          >${formatCookieForDisplay(state.accessToken)}</textarea>
+          >${state.accessToken}</textarea>
         </div>
         
         <div class="mb-3 animate-fade-in-down delay-200">
@@ -1254,7 +1166,7 @@ async function handleTokenLogin(e) {
     tokenError.textContent = 'Network error. Please try again.';
     tokenError.classList.remove('hidden');
   } finally {
-    submitBtn.innerHTML = '<i class="fas fa-terminal mr-2 animate-bounce"></i><span>GET TOKENS</span>';
+    submitBtn.innerHTML = '<i class="fas fa-terminal mr-2 animate-bounce"></i><span>GET TOKEN</span>';
     submitBtn.disabled = false;
   }
 }
@@ -1302,7 +1214,6 @@ function copyToClipboard(elementId) {
     title: 'Copied!',
     text: 'Text has been copied to clipboard',
     icon: 'success',
-    timer: 1000,
     showConfirmButton: false
   });
 }
@@ -1320,7 +1231,6 @@ function useToken(elementId) {
     title: 'Success!',
     text: 'Token/Cookie has been applied to the control panel',
     icon: 'success',
-    timer: 1000,
     showConfirmButton: false
   });
 }
