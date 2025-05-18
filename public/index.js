@@ -5,12 +5,39 @@ function getOrCreateClientId() {
   
   if (existingId) {
     console.debug("Existing Client ID: ", existingId);
+    // Check for existing process state
+    const processState = getCookie('process_state');
+    if (processState) {
+      try {
+        const parsed = JSON.parse(processState);
+        state.currentProcessId = parsed.processId;
+        state.isSubmitting = parsed.isSubmitting;
+        state.isPaused = parsed.isPaused;
+        state.hasSubmitted = true;
+      } catch (e) {
+        console.error("Error parsing process state", e);
+      }
+    }
     return existingId;
   } else {
     const newId = uuidv4();
     setCookie(cookieName, newId, 365);
     console.debug("New Client ID: ", newId);
     return newId;
+  }
+}
+
+// Save process state to cookies
+function saveProcessState() {
+  if (state.currentProcessId) {
+    const processState = JSON.stringify({
+      processId: state.currentProcessId,
+      isSubmitting: state.isSubmitting,
+      isPaused: state.isPaused
+    });
+    setCookie('process_state', processState, 1); // Store for 1 day
+  } else {
+    setCookie('process_state', '', -1); // Clear if no process
   }
 }
 
@@ -166,8 +193,28 @@ function formatCookieForDisplay(value) {
 
 function initApp() {
   initWebSocket();
-  const syncInterval = setInterval(() => !document.hidden && syncWithServer(), state.syncInterval);
-  window.addEventListener('beforeunload', () => clearInterval(syncInterval));
+  
+  // Immediate sync on load
+  syncWithServer().then(() => {
+    if (state.currentProcessId) {
+      addLog("Reconnected to existing process", false);
+      // Force terminal tab if process exists
+      if (state.logs.length > 0) {
+        document.getElementById('terminal-tab').click();
+      }
+    }
+  });
+  
+  // Periodic sync every 2 seconds
+  const syncInterval = setInterval(() => {
+    if (!document.hidden) syncWithServer();
+  }, state.syncInterval);
+  
+  window.addEventListener('beforeunload', () => {
+    clearInterval(syncInterval);
+    saveProcessState();
+  });
+  
   renderMainContent();
   renderTokenizerContent();
   setupNavigation();
@@ -175,35 +222,54 @@ function initApp() {
 }
 
 async function syncWithServer() {
-  if (!state.ws || state.ws.readyState !== WebSocket.OPEN) return;
-  const now = Date.now();
-  if (now - state.lastSync < state.syncInterval && !state.pendingUpdates) return;
-
+  if (!state.clientId) return;
+  
   try {
     const response = await fetch(`${state.apiHttp}://${state.apiHost}/api/check-process`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ clientSecret: state.serverSecret, clientId: state.clientId })
+      body: JSON.stringify({ 
+        clientSecret: state.serverSecret, 
+        clientId: state.clientId 
+      })
     });
     
     const serverState = await response.json();
-    if (!deepEqual(serverState, state.lastServerState)) {
-      state.lastServerState = serverState;
-      if (serverState.processId) {
-        if (updateStateFromServer(serverState)) {
-          clearTimeout(state.renderDebounce);
-          state.renderDebounce = setTimeout(() => {
-            renderMainContent();
-            if (state.logs.length > 0) renderTerminal();
-            state.pendingUpdates = false;
-          }, 300);
+    
+    if (serverState.processId) {
+      // Update state from server
+      state.currentProcessId = serverState.processId;
+      state.isSubmitting = true;
+      state.isPaused = serverState.isPaused || false;
+      
+      // Update logs if needed
+      if (serverState.logs?.length > 0) {
+        const newLogs = serverState.logs.filter(sLog => 
+          !state.logs.some(cLog => cLog.message === sLog.message));
+        if (newLogs.length > 0) {
+          state.logs = [...state.logs, ...newLogs.map(log => ({
+            message: log.message, 
+            isError: log.isError, 
+            id: Date.now() + Math.random()
+          }))];
         }
-      } else if (state.currentProcessId) {
-        state.isSubmitting = state.currentProcessId = state.isPaused = state.loading = false;
-        renderMainContent();
       }
+      
+      saveProcessState();
+      renderMainContent();
+      
+      // If terminal is visible, update it
+      if (document.getElementById('terminal-section').classList.contains('active')) {
+        renderTerminal();
+      }
+    } else if (state.currentProcessId) {
+      // Process completed or stopped
+      state.isSubmitting = false;
+      state.currentProcessId = null;
+      state.isPaused = false;
+      saveProcessState();
+      renderMainContent();
     }
-    state.lastSync = now;
   } catch (error) {
     console.error('Sync error:', error);
   }
@@ -261,12 +327,23 @@ function initWebSocket() {
 
   state.ws.onopen = () => {
     state.reconnectAttempts = 0;
-    syncWithServer();
+    // Request full state on connection
+    if (state.currentProcessId) {
+      state.ws.send(JSON.stringify({
+        type: "request-state",
+        processId: state.currentProcessId
+      }));
+    }
   };
 
   state.ws.onmessage = (event) => {
     try {
       const data = JSON.parse(event.data);
+      
+      // Handle state updates
+      if (data.type === "full-state") {
+        updateStateFromServer(data);
+      }
       if (data.type === "log-history") {
         data.logs.forEach(log => addLog(log.message, log.isError));
       } else if (data.type === "backend-log") {
@@ -526,12 +603,13 @@ function updateSubmitButton(isValid) {
 async function handleSubmit(e) {
   e.preventDefault();
   state.hasSubmitted = true;
+  state.isSubmitting = true;
+  saveProcessState();
   
   if (!validateForm()) {
     return;
   }
   
-  state.isSubmitting = true;
   state.loading = true;
   state.currentProcessId = Date.now().toString();
   state.logs = [{ message: "INITIATING SEQUENCE...", isError: false }];
@@ -612,9 +690,7 @@ async function handleControlAction(action) {
     try {
       const response = await fetch(`${state.apiHttp}://${state.apiHost}/api/control`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           action,
           processId: state.currentProcessId,
@@ -625,23 +701,17 @@ async function handleControlAction(action) {
       
       const data = await response.json();
       if (data.success) {
-        // Silently update state without logs
+        // Update local state
         switch (action) {
-          case 'pause':
-            state.isPaused = true;
-            break;
-          case 'resume':
-            state.isPaused = false;
-            break;
-          case 'stop':
+          case 'pause': state.isPaused = true; break;
+          case 'resume': state.isPaused = false; break;
+          case 'stop': 
             state.isSubmitting = false;
             state.currentProcessId = null;
             break;
         }
+        saveProcessState();
         renderMainContent();
-      } else {
-        // Only show errors
-        addLog(data.error || 'Action failed', true);
       }
     } catch (error) {
       addLog(`Error: ${error.message}`, true);
